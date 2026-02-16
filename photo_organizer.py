@@ -3,51 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
-
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".heic",
-    ".heif",
-    ".gif",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".webp",
-    ".dng",
-    ".raw",
-    ".arw",
-    ".cr2",
-    ".cr3",
-    ".nef",
-    ".orf",
-    ".rw2",
-}
-
-VIDEO_EXTENSIONS = {
-    ".mp4",
-    ".mov",
-    ".m4v",
-    ".avi",
-    ".mkv",
-    ".3gp",
-    ".mts",
-    ".m2ts",
-    ".mpg",
-    ".mpeg",
-    ".wmv",
-    ".webm",
-}
+from common.file_datetime import collect_file_datetime_context
+from common.media import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 SIDECAR_EXTENSIONS = {
     ".aae",
@@ -58,23 +22,10 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | SIDECAR_EXTENSIONS
 
 
 @dataclass(frozen=True)
-class Candidate:
-    source: str
-    timestamp: datetime
-    score: float
-
-    @property
-    def iso(self) -> str:
-        return self.timestamp.isoformat()
-
-
-@dataclass(frozen=True)
 class TimeEstimate:
     estimated_at: datetime
-    estimated_source: str
-    media_estimated_at: datetime | None
-    filesystem_estimated_at: datetime
-    filesystem_estimated_from: str
+    media_most_likely_at: datetime | None
+    fs_most_likely_at: datetime
 
 
 @dataclass(frozen=True)
@@ -100,9 +51,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["copy", "move"],
-        default="copy",
-        help="Transfer mode: copy files (default) or move files.",
+        choices=["dry_run", "copy", "move"],
+        default="dry_run",
+        help="Transfer mode: dry_run (default), copy files, or move files.",
     )
     return parser.parse_args()
 
@@ -122,197 +73,31 @@ def ensure_required_commands() -> bool:
     return False
 
 
-def parse_datetime(value: object) -> datetime | None:
-    if isinstance(value, (int, float)):
-        try:
-            return datetime.fromtimestamp(float(value), tz=timezone.utc).astimezone()
-        except (OSError, OverflowError, ValueError):
-            return None
-    if not isinstance(value, str):
-        return None
-
-    text = value.strip().replace("\x00", "")
-    if not text:
-        return None
-
-    exif_prefix = text[:19]
-    try:
-        parsed = datetime.strptime(exif_prefix, "%Y:%m:%d %H:%M:%S")
-        suffix = text[19:].strip().replace(" ", "")
-        if suffix == "Z":
-            return parsed.replace(tzinfo=timezone.utc)
-        if suffix.startswith(("+", "-")) and len(suffix) in {5, 6}:
-            if len(suffix) == 5:
-                suffix = f"{suffix[:3]}:{suffix[3:]}"
-            return datetime.fromisoformat(f"{parsed.isoformat()}{suffix}")
-        return parsed
-    except ValueError:
-        pass
-
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def with_local_timezone_if_naive(value: datetime) -> datetime:
-    if value.tzinfo is not None:
-        return value
-    return value.replace(tzinfo=datetime.now().astimezone().tzinfo)
-
-
-def run_json_command(command: list[str]) -> Any | None:
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        return None
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-
-
-def exiftool_candidates(file_path: Path, is_video: bool) -> list[Candidate]:
-    payload = run_json_command(["exiftool", "-j", "-s", "-n", str(file_path)])
-    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
-        return []
-
-    record = payload[0]
-    candidates: list[Candidate] = []
-    priority = [
-        ("DateTimeOriginal", 1.00),
-        ("CreateDate", 0.95),
-        ("DateTimeDigitized", 0.92),
-        ("CreationDate", 0.92),
-        ("TrackCreateDate", 0.90),
-        ("MediaCreateDate", 0.90),
-        ("ModifyDate", 0.70),
-    ]
-
-    for field, score in priority:
-        raw = record.get(field)
-        parsed = parse_datetime(raw)
-        if parsed is None:
-            continue
-        normalized = with_local_timezone_if_naive(parsed)
-        candidates.append(
-            Candidate(
-                source=f"exiftool:{field}",
-                timestamp=normalized,
-                score=score if not is_video else min(score, 0.97),
-            )
-        )
-    return candidates
-
-
-def ffprobe_candidates(file_path: Path) -> list[Candidate]:
-    payload = run_json_command(
-        [
-            "ffprobe",
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-            str(file_path),
-        ]
-    )
-    if not isinstance(payload, dict):
-        return []
-
-    candidates: list[Candidate] = []
-    format_tags = payload.get("format", {}).get("tags", {})
-    if isinstance(format_tags, dict):
-        raw = format_tags.get("creation_time")
-        parsed = parse_datetime(raw)
-        if parsed is not None:
-            candidates.append(
-                Candidate(
-                    source="ffprobe:format.tags.creation_time",
-                    timestamp=with_local_timezone_if_naive(parsed),
-                    score=0.93,
-                )
-            )
-
-    streams = payload.get("streams", [])
-    if isinstance(streams, list):
-        for idx, stream in enumerate(streams):
-            if not isinstance(stream, dict):
-                continue
-            tags = stream.get("tags", {})
-            if not isinstance(tags, dict):
-                continue
-            raw = tags.get("creation_time")
-            parsed = parse_datetime(raw)
-            if parsed is None:
-                continue
-            candidates.append(
-                Candidate(
-                    source=f"ffprobe:streams[{idx}].tags.creation_time",
-                    timestamp=with_local_timezone_if_naive(parsed),
-                    score=0.90,
-                )
-            )
-
-    return candidates
-
-
-def filesystem_candidate(file_path: Path) -> tuple[Candidate, str]:
-    stat = file_path.stat()
-    birth_time = (
-        datetime.fromtimestamp(stat.st_birthtime).astimezone()
-        if hasattr(stat, "st_birthtime")
-        else None
-    )
-    mtime = datetime.fromtimestamp(stat.st_mtime).astimezone()
-    ctime = datetime.fromtimestamp(stat.st_ctime).astimezone()
-    named_times: list[tuple[str, datetime]] = [("mtime", mtime), ("ctime", ctime)]
-    if birth_time is not None:
-        named_times.append(("birthtime", birth_time))
-    oldest_name, oldest_time = min(named_times, key=lambda item: item[1].timestamp())
-    return (
-        Candidate(
-            source="filesystem:oldest_of_birth_mtime_ctime",
-            timestamp=oldest_time,
-            score=0.65,
-        ),
-        oldest_name,
-    )
-
-
 def estimate_time(file_path: Path) -> TimeEstimate:
     suffix = file_path.suffix.lower()
-    is_video = suffix in VIDEO_EXTENSIONS
-    is_image = suffix in IMAGE_EXTENSIONS
+    context = collect_file_datetime_context(
+        file_path,
+        allow_nonzero_tool_exit=True,
+        include_ffprobe_for_unknown=suffix not in SIDECAR_EXTENSIONS,
+    )
 
-    all_candidates: list[Candidate] = []
-    exif_candidates = exiftool_candidates(file_path, is_video=is_video)
-    all_candidates.extend(exif_candidates)
-    ffprobe_result: list[Candidate] = []
+    if context.most_likely < 0 or context.most_likely >= len(context.candidates):
+        raise RuntimeError("invalid pair most_likely index")
+    if context.fs_most_likely < 0 or context.fs_most_likely >= len(context.candidates):
+        raise RuntimeError("invalid fs most_likely index")
 
-    if is_video or (not is_image and suffix not in SIDECAR_EXTENSIONS):
-        ffprobe_result = ffprobe_candidates(file_path)
-        all_candidates.extend(ffprobe_result)
-
-    fs_candidate, fs_from = filesystem_candidate(file_path)
-    all_candidates.append(fs_candidate)
-
-    # Keep it simple: pick the oldest timestamp among all candidates.
-    best = min(all_candidates, key=lambda c: c.timestamp.timestamp())
-    media_candidates = exif_candidates + ffprobe_result
+    best = context.candidates[context.most_likely]
+    fs_best = context.candidates[context.fs_most_likely]
     media_best = (
-        min(media_candidates, key=lambda c: c.timestamp.timestamp())
-        if media_candidates
+        context.candidates[context.media_most_likely]
+        if context.media_most_likely >= 0
         else None
     )
 
     return TimeEstimate(
         estimated_at=best.timestamp,
-        estimated_source=best.source,
-        media_estimated_at=media_best.timestamp if media_best else None,
-        filesystem_estimated_at=fs_candidate.timestamp,
-        filesystem_estimated_from=fs_from,
+        media_most_likely_at=media_best.timestamp if media_best else None,
+        fs_most_likely_at=fs_best.timestamp,
     )
 
 
@@ -379,17 +164,22 @@ def copy_by_plan(
         quarter = ((month - 1) // 3) + 1
         quarter_key = f"{year}Q{quarter}"
         quarter_dir = output_dir / quarter_key
-        quarter_dir.mkdir(parents=True, exist_ok=True)
 
-        existing_date_dirs = sorted(
-            p for p in quarter_dir.iterdir() if p.is_dir() and p.name.startswith(record.date_key)
+        if mode != "dry_run":
+            quarter_dir.mkdir(parents=True, exist_ok=True)
+
+        existing_date_dirs = (
+            sorted(p for p in quarter_dir.iterdir() if p.is_dir() and p.name.startswith(record.date_key))
+            if quarter_dir.exists()
+            else []
         )
         target_dir = existing_date_dirs[0] if existing_date_dirs else quarter_dir / record.date_key
-        target_dir.mkdir(parents=True, exist_ok=True)
+        if mode != "dry_run":
+            target_dir.mkdir(parents=True, exist_ok=True)
         date_folders.add(record.date_key)
 
         target_file = target_dir / record.source.name
-        if target_file.exists():
+        if target_file.exists() or target_file in dest_source_map:
             skipped += 1
             from_source = dest_source_map.get(target_file)
             skipped_entries.append((record, target_file, from_source))
@@ -397,7 +187,7 @@ def copy_by_plan(
 
         if mode == "move":
             shutil.move(record.source, target_file)
-        else:
+        elif mode == "copy":
             shutil.copy2(record.source, target_file)
         dest_source_map[target_file] = record.source
         copied_entries.append((record, target_file))
@@ -414,17 +204,15 @@ def write_skipped_log(skipped_entries: list[tuple[FileRecord, Path, Path | None]
     log_path = Path.cwd() / "skipped_files.log"
     with log_path.open("w", encoding="utf-8") as f:
         f.write(
-            "source\testimated_at\testimated_source\texiftool|ffprobe_estimated_at\tfilesystem_estimated_at\tfilesystem_estimated_from\ttarget\tfrom_src\n"
+            "source\testimated_at\tmedia_most_likely_at\tfs_most_likely_at\ttarget\tfrom_source\n"
         )
         for record, target, from_source in skipped_entries:
             from_source_text = str(from_source) if from_source else "unknown"
             f.write(
                 f"{record.source}\t"
                 f"{format_dt(record.estimate.estimated_at)}\t"
-                f"{record.estimate.estimated_source}\t"
-                f"{format_dt(record.estimate.media_estimated_at)}\t"
-                f"{format_dt(record.estimate.filesystem_estimated_at)}\t"
-                f"{record.estimate.filesystem_estimated_from}\t"
+                f"{format_dt(record.estimate.media_most_likely_at)}\t"
+                f"{format_dt(record.estimate.fs_most_likely_at)}\t"
                 f"{target}\t"
                 f"{from_source_text}\n"
             )
@@ -435,16 +223,14 @@ def write_copied_log(copied_entries: list[tuple[FileRecord, Path]]) -> Path:
     log_path = Path.cwd() / "copied_files.log"
     with log_path.open("w", encoding="utf-8") as f:
         f.write(
-            "source\testimated_at\testimated_source\texiftool|ffprobe_estimated_at\tfilesystem_estimated_at\tfilesystem_estimated_from\ttarget\n"
+            "source\testimated_at\tmedia_most_likely_at\tfs_most_likely_at\ttarget\n"
         )
         for record, target in copied_entries:
             f.write(
                 f"{record.source}\t"
                 f"{format_dt(record.estimate.estimated_at)}\t"
-                f"{record.estimate.estimated_source}\t"
-                f"{format_dt(record.estimate.media_estimated_at)}\t"
-                f"{format_dt(record.estimate.filesystem_estimated_at)}\t"
-                f"{record.estimate.filesystem_estimated_from}\t"
+                f"{format_dt(record.estimate.media_most_likely_at)}\t"
+                f"{format_dt(record.estimate.fs_most_likely_at)}\t"
                 f"{target}\n"
             )
     return log_path
@@ -463,7 +249,8 @@ def main() -> int:
         print(f"Input directory does not exist or is not a directory: {input_dir}")
         return 1
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if args.mode != "dry_run":
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     records, processed = collect_plan(input_dir)
     copied, skipped, date_folder_count, skipped_entries, copied_entries = copy_by_plan(
@@ -472,7 +259,7 @@ def main() -> int:
     skipped_log_path = write_skipped_log(skipped_entries)
     copied_log_path = write_copied_log(copied_entries)
 
-    action_label = "Moved" if args.mode == "move" else "Copied"
+    action_label = "Moved" if args.mode == "move" else ("Copied" if args.mode == "copy" else "Planned")
     print(
         f"Done. Processed: {processed}, {action_label}: {copied}, "
         f"Date folders: {date_folder_count}, Output: {output_dir}, "
