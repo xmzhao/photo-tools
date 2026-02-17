@@ -6,61 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, NamedTuple
-from urllib.parse import urlencode
-from urllib.request import urlopen
+from typing import NamedTuple
 
-try:
-    from PIL import Image
-    from PIL.ExifTags import GPSTAGS, TAGS
-except ImportError:  # pragma: no cover - optional dependency.
-    Image = None
-    GPSTAGS = {}
-    TAGS = {}
-
-
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".heic",
-    ".heif",
-    ".gif",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".webp",
-    ".dng",
-    ".raw",
-    ".arw",
-    ".cr2",
-    ".cr3",
-    ".nef",
-    ".orf",
-    ".rw2",
-}
-
-VIDEO_EXTENSIONS = {
-    ".mp4",
-    ".mov",
-    ".m4v",
-    ".avi",
-    ".mkv",
-    ".3gp",
-    ".mts",
-    ".m2ts",
-    ".mpg",
-    ".mpeg",
-    ".wmv",
-    ".webm",
-}
-
-AMAP_REGEO_URL = "https://restapi.amap.com/v3/geocode/regeo"
-TIANDITU_REGEO_URL = "https://api.tianditu.gov.cn/geocoder"
+from common.geocode import reverse_geocode_amap, reverse_geocode_tianditu
+from common.gps import extract_gps
+from common.media import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 
 class MediaCounts(NamedTuple):
@@ -110,188 +63,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run_json_command(command: list[str]) -> Any | None:
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-
-
-def parse_number(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return None
-
-
-def extract_gps_with_exiftool(file_path: Path) -> tuple[float, float] | None:
-    payload = run_json_command(
-        [
-            "exiftool",
-            "-j",
-            "-n",
-            "-GPSLatitude",
-            "-GPSLongitude",
-            str(file_path),
-        ]
-    )
-    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
-        return None
-
-    record = payload[0]
-    latitude = parse_number(record.get("GPSLatitude"))
-    longitude = parse_number(record.get("GPSLongitude"))
-    if latitude is None or longitude is None:
-        return None
-    return latitude, longitude
-
-
-def ratio_to_float(value: Any) -> float:
-    if hasattr(value, "numerator") and hasattr(value, "denominator"):
-        return float(value.numerator) / float(value.denominator)
-    if isinstance(value, tuple) and len(value) == 2:
-        return float(value[0]) / float(value[1])
-    return float(value)
-
-
-def dms_to_decimal(dms: Any, ref: str) -> float:
-    degrees = ratio_to_float(dms[0])
-    minutes = ratio_to_float(dms[1])
-    seconds = ratio_to_float(dms[2])
-    decimal = degrees + minutes / 60 + seconds / 3600
-    if ref in {"S", "W"}:
-        decimal = -decimal
-    return decimal
-
-
-def extract_gps_with_pillow(file_path: Path) -> tuple[float, float] | None:
-    if Image is None:
-        return None
-
-    try:
-        with Image.open(file_path) as img:
-            exif_raw = img._getexif() or {}
-    except Exception:  # noqa: BLE001
-        return None
-
-    exif = {TAGS.get(tag, tag): value for tag, value in exif_raw.items()}
-    gps_info_raw = exif.get("GPSInfo")
-    if not gps_info_raw:
-        return None
-
-    gps_info = {GPSTAGS.get(tag, tag): value for tag, value in gps_info_raw.items()}
-    lat = gps_info.get("GPSLatitude")
-    lat_ref = gps_info.get("GPSLatitudeRef")
-    lon = gps_info.get("GPSLongitude")
-    lon_ref = gps_info.get("GPSLongitudeRef")
-
-    if not all([lat, lat_ref, lon, lon_ref]):
-        return None
-
-    try:
-        latitude = dms_to_decimal(lat, str(lat_ref))
-        longitude = dms_to_decimal(lon, str(lon_ref))
-    except Exception:  # noqa: BLE001
-        return None
-
-    return latitude, longitude
-
-
-def extract_gps(file_path: Path) -> tuple[float, float] | None:
-    # exiftool supports both image and video metadata, so prefer it.
-    gps = extract_gps_with_exiftool(file_path)
-    if gps is not None:
-        return gps
-
-    if file_path.suffix.lower() in IMAGE_EXTENSIONS:
-        return extract_gps_with_pillow(file_path)
-    return None
-
-
-def reverse_geocode_amap(latitude: float, longitude: float, amap_key: str) -> dict[str, str]:
-    query = {
-        "key": amap_key,
-        "location": f"{longitude:.8f},{latitude:.8f}",
-        "extensions": "all",
-        "radius": "500",
-        "output": "json",
-    }
-    url = f"{AMAP_REGEO_URL}?{urlencode(query)}"
-
-    with urlopen(url, timeout=10) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-
-    if data.get("status") != "1":
-        info = data.get("info", "unknown")
-        raise RuntimeError(f"Amap reverse geocode failed: {info}")
-
-    regeo = data.get("regeocode") or {}
-    address_component = regeo.get("addressComponent") or {}
-    city_raw = address_component.get("city", "")
-    if isinstance(city_raw, list):
-        city = str(city_raw[0]) if city_raw else ""
-    else:
-        city = str(city_raw or "")
-    if not city:
-        city = str(address_component.get("province", ""))
-
-    pois = regeo.get("pois") or []
-    top_poi = pois[0] if pois else {}
-    poi_name = str(top_poi.get("name", ""))
-
-    return {
-        "city": city.strip(),
-        "poi": poi_name.strip(),
-    }
-
-
-def reverse_geocode_tianditu(
-    latitude: float,
-    longitude: float,
-    tianditu_key: str,
-) -> dict[str, str]:
-    post_str = json.dumps({"lon": longitude, "lat": latitude, "ver": 1}, ensure_ascii=False)
-    query = {
-        "postStr": post_str,
-        "type": "geocode",
-        "tk": tianditu_key,
-    }
-    url = f"{TIANDITU_REGEO_URL}?{urlencode(query)}"
-
-    with urlopen(url, timeout=10) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-
-    status = str(data.get("status", ""))
-    if status not in {"0", "200"}:
-        msg = data.get("msg", "unknown")
-        raise RuntimeError(f"Tianditu reverse geocode failed: {msg}")
-
-    result = data.get("result") or {}
-    address_component = result.get("addressComponent") or {}
-    city = str(address_component.get("city", "")).strip()
-    if not city:
-        city = str(address_component.get("province", "")).strip()
-
-    pois = result.get("pois") or []
-    top_poi = pois[0] if pois else {}
-    poi_name = str(top_poi.get("name", "")).strip()
-
-    return {
-        "city": city,
-        "poi": poi_name,
-    }
-
-
 def to_city_poi(city: str, poi: str) -> str | None:
     if city and poi:
         return f"{city}-{poi}"
@@ -321,7 +92,8 @@ def reverse_geocode_city_poi(
     except Exception:  # noqa: BLE001
         return None
 
-    return to_city_poi(geo["city"], geo["poi"])
+    top_poi = geo["pois"][0] if geo["pois"] else {}
+    return to_city_poi(geo["city"], str(top_poi.get("name", "")).strip())
 
 
 def scan_direct_media_counts(root: Path) -> dict[Path, MediaCounts]:
@@ -363,7 +135,7 @@ def scan_direct_poi_votes(
             if extension not in IMAGE_EXTENSIONS and extension not in VIDEO_EXTENSIONS:
                 continue
 
-            gps = extract_gps(file_path)
+            gps = extract_gps(file_path, image_extensions=IMAGE_EXTENSIONS)
             if gps is None:
                 continue
 
