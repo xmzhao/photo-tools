@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>媒体地图浏览器</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div id="app-shell">
+      <div class="top-card">
+        <div class="title-wrap">
+          <h1>Media Map Browser</h1>
+          <p>本地扫描图片/视频，地图聚合展示缩略图</p>
+        </div>
+
+        <div class="scan-controls">
+          <label for="pathInput">目录路径</label>
+          <input id="pathInput" type="text" placeholder="输入本机绝对路径，如 /Users/you/Pictures" />
+          <button id="pickDirBtn" type="button">选择目录</button>
+          <button id="scanBtn">开始扫描</button>
+          <span id="scanStatus">空闲</span>
+        </div>
+      </div>
+
+      <div id="map"></div>
+
+      <aside class="side-card">
+        <section class="panel-block">
+          <h2>筛选</h2>
+          <div class="filter-grid">
+            <input id="keywordInput" type="text" placeholder="按文件名搜索" />
+            <select id="typeSelect">
+              <option value="all">全部类型</option>
+              <option value="image">仅图片</option>
+              <option value="video">仅视频</option>
+            </select>
+            <div class="date-row">
+              <input id="fromDate" type="date" />
+              <input id="toDate" type="date" />
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-block">
+          <h2>统计</h2>
+          <div id="summaryText" class="summary">总计 0，已定位 0，未定位 0</div>
+          <div id="progressBar"><span></span></div>
+        </section>
+
+        <section class="panel-block">
+          <h2>缓存目录</h2>
+          <div class="cache-actions">
+            <button id="refreshCacheBtn" type="button">刷新缓存</button>
+            <button id="loadSelectedCacheBtn" type="button">加载选中</button>
+            <button id="toggleSelectCacheBtn" type="button">全选</button>
+            <button id="clearCacheBtn" type="button">清空全部缓存</button>
+          </div>
+          <div id="cacheSummary" class="summary">缓存：目录 0，元数据 0，缩略图 0，预览 0</div>
+          <div id="cacheList" class="list"></div>
+        </section>
+
+        <section class="panel-block">
+          <h2>当前位置分组</h2>
+          <div id="clusterList" class="list"></div>
+        </section>
+
+        <section class="panel-block">
+          <h2>未定位文件</h2>
+          <div id="unlocatedList" class="list"></div>
+        </section>
+      </aside>
+    </div>
+
+    <div id="previewModal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <button id="closeModal" class="close-btn">关闭</button>
+        <div id="previewMedia" class="preview-media"></div>
+        <div id="previewMeta" class="preview-meta"></div>
+      </div>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

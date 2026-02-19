@@ -1,0 +1,396 @@
+:root {
+  --paper: rgba(245, 253, 244, 0.9);
+  --accent: #2f6f5a;
+  --accent-strong: #164435;
+  --ink: #16312c;
+  --muted: #4b6a63;
+  --ring: rgba(255, 255, 255, 0.72);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  font-family: "Space Grotesk", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  color: var(--ink);
+  background: linear-gradient(145deg, #1d3c34 0%, #6a9784 60%, #b8d8c8 100%);
+}
+
+#app-shell {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+#map {
+  width: 100%;
+  height: 100%;
+}
+
+.top-card {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 1000;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  background: var(--paper);
+  border: 1px solid rgba(22, 68, 53, 0.18);
+  border-radius: 16px;
+  box-shadow: 0 16px 40px rgba(6, 33, 26, 0.2);
+  padding: 14px 16px;
+  backdrop-filter: blur(6px);
+}
+
+.title-wrap h1 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.02em;
+}
+
+.title-wrap p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scan-controls {
+  display: grid;
+  grid-template-columns: auto minmax(280px, 340px) auto auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.scan-controls label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+input,
+select,
+button {
+  border-radius: 10px;
+  border: 1px solid rgba(22, 68, 53, 0.25);
+  padding: 8px 10px;
+  font: inherit;
+}
+
+input,
+select {
+  background: rgba(255, 255, 255, 0.88);
+  min-width: 0;
+  width: 100%;
+}
+
+button {
+  cursor: pointer;
+  background: linear-gradient(135deg, #43896f, #1b5342);
+  color: #f2fff8;
+  border: none;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+#scanStatus {
+  min-width: 120px;
+  max-width: 240px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-card {
+  position: absolute;
+  top: 112px;
+  right: 16px;
+  bottom: 16px;
+  width: min(380px, calc(100vw - 32px));
+  z-index: 1000;
+  overflow: auto;
+  overflow-x: hidden;
+  background: var(--paper);
+  border: 1px solid rgba(22, 68, 53, 0.18);
+  border-radius: 16px;
+  padding: 12px;
+  box-shadow: 0 16px 40px rgba(6, 33, 26, 0.24);
+  backdrop-filter: blur(6px);
+}
+
+.panel-block + .panel-block {
+  margin-top: 12px;
+}
+
+.panel-block h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.date-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.date-row input[type="date"] {
+  min-width: 0;
+  width: 100%;
+  padding-right: 30px;
+}
+
+.date-row input[type="date"]::-webkit-calendar-picker-indicator {
+  margin-left: 0;
+}
+
+.summary {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#progressBar {
+  margin-top: 8px;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(22, 68, 53, 0.12);
+  overflow: hidden;
+}
+
+#progressBar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #67bd94, #23785e);
+  transition: width 0.2s ease;
+}
+
+.list {
+  display: grid;
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.list-item {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: 8px;
+  border: 1px solid rgba(22, 68, 53, 0.18);
+  border-radius: 12px;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+}
+
+.list-item img {
+  width: 58px;
+  height: 58px;
+  object-fit: cover;
+  border-radius: 10px;
+}
+
+.list-item h3 {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.list-item p {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cache-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.cache-item {
+  grid-template-columns: 1fr;
+  gap: 6px;
+  cursor: default;
+}
+
+.cache-item .cache-head {
+  font-size: 12px;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.cache-item .cache-header {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.cache-item .cache-check {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+
+.cache-item .cache-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cache-item .cache-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.cache-item .cache-buttons button {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.thumb-pin {
+  width: 84px;
+  height: 84px;
+  border-radius: 18px;
+  border: 4px solid var(--ring);
+  overflow: hidden;
+  position: relative;
+  box-shadow: 0 12px 28px rgba(16, 47, 40, 0.4);
+}
+
+.thumb-pin::after {
+  content: "";
+  width: 18px;
+  height: 18px;
+  background: var(--ring);
+  position: absolute;
+  left: 32px;
+  bottom: -8px;
+  transform: rotate(45deg);
+  border-radius: 2px;
+}
+
+.thumb-pin img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb-pin .count {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  font-size: 21px;
+  font-weight: 700;
+  color: white;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.65);
+  z-index: 3;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+}
+
+.hidden {
+  display: none;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(5, 18, 16, 0.64);
+}
+
+.modal-content {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(900px, 92vw);
+  max-height: 88vh;
+  background: #eff9ef;
+  border-radius: 16px;
+  padding: 14px;
+  overflow: auto;
+}
+
+.close-btn {
+  float: right;
+  margin-bottom: 10px;
+}
+
+.preview-media img,
+.preview-media video {
+  width: 100%;
+  max-height: 64vh;
+  object-fit: contain;
+  border-radius: 12px;
+  background: #0f2924;
+}
+
+.preview-media .summary {
+  margin-top: 8px;
+}
+
+.preview-meta {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+@media (max-width: 980px) {
+  .top-card {
+    right: 16px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .scan-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .side-card {
+    top: auto;
+    height: 46vh;
+    width: calc(100% - 32px);
+    right: 16px;
+    left: 16px;
+    bottom: 12px;
+  }
+
+  .thumb-pin {
+    width: 74px;
+    height: 74px;
+  }
+
+  .thumb-pin::after {
+    left: 28px;
+  }
+
+  .date-row {
+    grid-template-columns: 1fr;
+  }
+}
