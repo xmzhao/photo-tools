@@ -17,68 +17,84 @@
   </head>
   <body>
     <div id="app-shell">
-      <div class="top-card">
-        <div class="title-wrap">
+      <aside class="side-card">
+        <div class="sidebar-head">
           <h1>Media Map Browser</h1>
           <p>本地扫描图片/视频，地图聚合展示缩略图</p>
+          <div id="scanStatus" class="summary">空闲</div>
         </div>
 
-        <div class="scan-controls">
-          <label for="pathInput">目录路径</label>
-          <input id="pathInput" type="text" placeholder="输入本机绝对路径，如 /Users/you/Pictures" />
-          <button id="pickDirBtn" type="button">选择目录</button>
-          <button id="scanBtn">开始扫描</button>
-          <span id="scanStatus">空闲</span>
+        <div class="sheet-pages">
+          <div id="mediaSheet" class="sheet-page active">
+            <section class="panel-block">
+              <h2>目录扫描</h2>
+              <div class="scan-controls">
+                <label for="pathInput">目录路径</label>
+                <input id="pathInput" type="text" placeholder="输入本机绝对路径，如 /Users/you/Pictures" />
+                <button id="pickDirBtn" type="button">选择目录</button>
+                <button id="scanBtn">开始扫描</button>
+              </div>
+            </section>
+
+            <section class="panel-block">
+              <h2>统计</h2>
+              <div id="summaryText" class="summary">总计 0，已定位 0，未定位 0</div>
+              <div id="progressBar"><span></span></div>
+            </section>
+
+            <section class="panel-block">
+              <h2>缓存目录</h2>
+              <div class="cache-actions">
+                <button id="refreshCacheBtn" type="button">刷新缓存</button>
+                <button id="loadSelectedCacheBtn" type="button">加载选中</button>
+                <button id="toggleSelectCacheBtn" type="button">全选</button>
+                <button id="clearCacheBtn" type="button">清空全部缓存</button>
+              </div>
+              <div id="cacheSummary" class="summary">缓存：目录 0，元数据 0，缩略图 0，预览 0，边界 0</div>
+              <div id="cacheList" class="list"></div>
+            </section>
+
+            <section class="panel-block">
+              <h2>当前位置分组</h2>
+              <div id="clusterList" class="list"></div>
+            </section>
+
+            <section class="panel-block">
+              <h2>未定位文件</h2>
+              <div id="unlocatedList" class="list"></div>
+            </section>
+          </div>
+
+          <div id="regionSheet" class="sheet-page">
+            <section class="panel-block">
+              <h2>地名区域着色</h2>
+              <div class="scope-tabs">
+                <button id="globalScopeTab" class="scope-tab active" type="button">全球（国家）</button>
+                <button id="chinaProvinceScopeTab" class="scope-tab" type="button">中国（省份）</button>
+                <button id="chinaPrefectureScopeTab" class="scope-tab" type="button">中国（地级市）</button>
+              </div>
+              <div id="chinaScopeHint" class="summary">中国地级市模式包含香港、澳门特别行政区。</div>
+              <label class="summary" for="placeFileInput">上传地名列表文件（txt/csv）</label>
+              <input id="placeFileInput" type="file" accept=".txt,.csv,text/plain" />
+              <textarea id="placeTextInput" class="place-text" placeholder="输入地名，支持换行、逗号分隔。例如：北京、成都、俄罗斯"></textarea>
+              <div class="cache-actions">
+                <button id="highlightPlacesBtn" type="button">应用地名着色</button>
+                <button id="clearHighlightsBtn" type="button">清除地名着色</button>
+                <button id="exportRegionSvgBtn" type="button">导出 SVG（高清）</button>
+              </div>
+              <div id="placeResultSummary" class="summary">未启用区域着色</div>
+              <div id="placeUnmatchedList" class="list"></div>
+            </section>
+          </div>
         </div>
-      </div>
+
+        <div class="sheet-tabs">
+          <button id="mediaSheetTab" class="sheet-tab active" type="button">媒体模式</button>
+          <button id="regionSheetTab" class="sheet-tab" type="button">区域模式</button>
+        </div>
+      </aside>
 
       <div id="map"></div>
-
-      <aside class="side-card">
-        <section class="panel-block">
-          <h2>筛选</h2>
-          <div class="filter-grid">
-            <input id="keywordInput" type="text" placeholder="按文件名搜索" />
-            <select id="typeSelect">
-              <option value="all">全部类型</option>
-              <option value="image">仅图片</option>
-              <option value="video">仅视频</option>
-            </select>
-            <div class="date-row">
-              <input id="fromDate" type="date" />
-              <input id="toDate" type="date" />
-            </div>
-          </div>
-        </section>
-
-        <section class="panel-block">
-          <h2>统计</h2>
-          <div id="summaryText" class="summary">总计 0，已定位 0，未定位 0</div>
-          <div id="progressBar"><span></span></div>
-        </section>
-
-        <section class="panel-block">
-          <h2>缓存目录</h2>
-          <div class="cache-actions">
-            <button id="refreshCacheBtn" type="button">刷新缓存</button>
-            <button id="loadSelectedCacheBtn" type="button">加载选中</button>
-            <button id="toggleSelectCacheBtn" type="button">全选</button>
-            <button id="clearCacheBtn" type="button">清空全部缓存</button>
-          </div>
-          <div id="cacheSummary" class="summary">缓存：目录 0，元数据 0，缩略图 0，预览 0</div>
-          <div id="cacheList" class="list"></div>
-        </section>
-
-        <section class="panel-block">
-          <h2>当前位置分组</h2>
-          <div id="clusterList" class="list"></div>
-        </section>
-
-        <section class="panel-block">
-          <h2>未定位文件</h2>
-          <div id="unlocatedList" class="list"></div>
-        </section>
-      </aside>
     </div>
 
     <div id="previewModal" class="modal hidden">

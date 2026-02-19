@@ -1,13 +1,34 @@
 const state = {
   map: null,
+  baseLayers: {},
+  mapLayerControl: null,
   markersLayer: null,
+  regionLayer: null,
+  regionHighlightLayer: null,
+  regionMode: false,
+  regionScope: "global",
+  worldBoundaries: null,
+  chinaProvinceBoundaries: null,
+  chinaPrefectureBoundaries: null,
+  worldBoundaryFeatures: [],
+  chinaProvinceBoundaryFeatures: [],
+  chinaPrefectureBoundaryFeatures: [],
+  worldAliasIndex: new Map(),
+  chinaProvinceAliasIndex: new Map(),
+  chinaPrefectureAliasIndex: new Map(),
+  chinaPrefectureProvinceLabelFeatureIds: new Set(),
+  chinaPrefectureProvinceLabelAnchors: new Map(),
+  chinaPrefectureFeatureProvinceCodes: new Map(),
+  activePrefectureProvinceCodes: new Set(),
+  regionMatchFilterActive: false,
+  activeRegionFeatureIds: new Set(),
   allLocated: [],
   allUnlocated: [],
-  filtered: [],
   activeJobId: null,
   cacheEntries: [],
   selectedCacheIds: new Set(),
   loadedCacheIds: new Set(),
+  activeSheet: "media",
 };
 
 const el = {
@@ -15,18 +36,29 @@ const el = {
   pickDirBtn: document.getElementById("pickDirBtn"),
   scanBtn: document.getElementById("scanBtn"),
   scanStatus: document.getElementById("scanStatus"),
+  mediaSheet: document.getElementById("mediaSheet"),
+  regionSheet: document.getElementById("regionSheet"),
+  mediaSheetTab: document.getElementById("mediaSheetTab"),
+  regionSheetTab: document.getElementById("regionSheetTab"),
+  globalScopeTab: document.getElementById("globalScopeTab"),
+  chinaProvinceScopeTab: document.getElementById("chinaProvinceScopeTab"),
+  chinaPrefectureScopeTab: document.getElementById("chinaPrefectureScopeTab"),
   summaryText: document.getElementById("summaryText"),
   progressBarFill: document.querySelector("#progressBar span"),
+  placeFileInput: document.getElementById("placeFileInput"),
+  placeTextInput: document.getElementById("placeTextInput"),
+  highlightPlacesBtn: document.getElementById("highlightPlacesBtn"),
+  clearHighlightsBtn: document.getElementById("clearHighlightsBtn"),
+  exportRegionSvgBtn: document.getElementById("exportRegionSvgBtn"),
+  placeResultSummary: document.getElementById("placeResultSummary"),
+  chinaScopeHint: document.getElementById("chinaScopeHint"),
+  placeUnmatchedList: document.getElementById("placeUnmatchedList"),
   refreshCacheBtn: document.getElementById("refreshCacheBtn"),
   loadSelectedCacheBtn: document.getElementById("loadSelectedCacheBtn"),
   toggleSelectCacheBtn: document.getElementById("toggleSelectCacheBtn"),
   clearCacheBtn: document.getElementById("clearCacheBtn"),
   cacheSummary: document.getElementById("cacheSummary"),
   cacheList: document.getElementById("cacheList"),
-  keywordInput: document.getElementById("keywordInput"),
-  typeSelect: document.getElementById("typeSelect"),
-  fromDate: document.getElementById("fromDate"),
-  toDate: document.getElementById("toDate"),
   clusterList: document.getElementById("clusterList"),
   unlocatedList: document.getElementById("unlocatedList"),
   previewModal: document.getElementById("previewModal"),
@@ -56,17 +88,67 @@ function initMap() {
     maxZoom: 19,
   });
 
-  street.addTo(state.map);
-  L.control.layers({
+  state.baseLayers = {
     标准底图: street,
     地形底图: topo,
     简洁底图: carto,
-  }).addTo(state.map);
+  };
+  street.addTo(state.map);
+  state.mapLayerControl = L.control.layers(state.baseLayers).addTo(state.map);
 
   state.markersLayer = L.layerGroup().addTo(state.map);
+  state.regionLayer = L.geoJSON(null, {
+    style: feature => getFeatureRegionStyle(feature, state.regionScope),
+    onEachFeature: (feature, layer) => {
+      const label = getFeatureMapLabel(feature, state.regionScope);
+      if (label) {
+        const offset = getLabelOffsetPx(feature, state.regionScope, 12);
+        const tooltip = L.tooltip({
+          direction: "center",
+          permanent: true,
+          interactive: false,
+          className: "region-map-label",
+          offset: L.point(offset.x, offset.y),
+          opacity: 1,
+        });
+        const anchor = getFeatureLabelAnchorForScope(feature, state.regionScope);
+        tooltip.setContent(String(label));
+        layer.bindTooltip(tooltip);
+        if (anchor) {
+          const anchorLatLng = L.latLng(anchor[1], anchor[0]);
+          const pinTooltipAnchor = () => {
+            const bound = layer.getTooltip();
+            if (bound) {
+              bound.setLatLng(anchorLatLng);
+            }
+          };
+          layer.on("add", pinTooltipAnchor);
+          layer.on("tooltipopen", pinTooltipAnchor);
+          pinTooltipAnchor();
+        }
+      }
+    },
+  });
+  state.regionHighlightLayer = L.geoJSON(null, {
+    interactive: false,
+    style: feature => getFeatureHighlightStyle(feature, state.regionScope),
+    onEachFeature: (feature, layer) => {
+      layer.on("add", () => {
+        applyHatchPatternToLayerPath(layer);
+      });
+    },
+  });
 
   state.map.on("zoomend", () => {
-    renderMapMarkers();
+    if (!state.regionMode) {
+      renderMapMarkers();
+      return;
+    }
+    if (state.regionHighlightLayer) {
+      state.regionHighlightLayer.eachLayer(layer => {
+        applyHatchPatternToLayerPath(layer);
+      });
+    }
   });
 }
 
@@ -94,6 +176,1593 @@ function previewUrl(id) {
   return `/api/preview?id=${encodeURIComponent(id)}`;
 }
 
+const PLACE_ALIAS_OVERRIDES = {
+  北京: ["北京", "北京市", "beijing"],
+  成都市: ["成都", "成都市", "四川", "四川省", "chengdu", "sichuan"],
+  成都: ["成都", "成都市", "四川", "四川省", "chengdu", "sichuan"],
+  俄罗斯: ["russia", "russianfederation", "russiafederation", "俄罗斯"],
+  中国: ["china", "people'srepublicofchina", "中华人民共和国", "中国"],
+  美国: ["usa", "unitedstates", "unitedstatesofamerica", "美国"],
+  英国: ["unitedkingdom", "greatbritain", "england", "英国"],
+  日本: ["japan", "日本"],
+  韩国: ["southkorea", "korea", "韩国"],
+  马来西亚: ["malaysia", "马来西亚"],
+  尼日利亚: ["nigeria", "尼日利亚"],
+  肯尼亚: ["kenya", "肯尼亚"],
+  卡塔尔: ["qatar", "卡塔尔"],
+  阿坝州: ["阿坝州", "阿坝藏族羌族自治州", "阿坝"],
+  甘孜州: ["甘孜州", "甘孜藏族自治州", "甘孜"],
+  博尔塔拉: ["博尔塔拉", "博尔塔拉蒙古自治州", "博州", "博乐"],
+  伊犁: ["伊犁", "伊犁州", "伊犁哈萨克自治州", "伊犁哈萨克"],
+  海北州: ["海北州", "海北", "海北藏族自治州"],
+  海西州: ["海西州", "海西", "海西蒙古族藏族自治州"],
+  恩施: ["恩施", "恩施州", "恩施土家族苗族自治州"],
+  大理: ["大理", "大理州", "大理白族自治州"],
+  红河: ["红河", "红河州", "红河哈尼族彝族自治州"],
+  香港: ["香港", "香港特别行政区", "hongkong", "hongkongsar", "hk", "hksar"],
+  澳门: ["澳门", "澳门特别行政区", "macao", "macau", "macaosar", "mo", "msar"],
+  德国: ["germany", "deutschland", "德国"],
+  法国: ["france", "法国"],
+  西班牙: ["spain", "españa", "西班牙"],
+  意大利: ["italy", "italia", "意大利"],
+  澳大利亚: ["australia", "澳大利亚"],
+  加拿大: ["canada", "加拿大"],
+  巴西: ["brazil", "brasil", "巴西"],
+  印度: ["india", "印度"],
+  南非: ["southafrica", "南非"],
+  墨西哥: ["mexico", "méxico", "墨西哥"],
+  新加坡: ["singapore", "新加坡"],
+};
+
+const CHINA_PROVINCE_ALIAS_OVERRIDES = {
+  "110000": ["北京", "北京市"],
+  "120000": ["天津", "天津市"],
+  "130000": ["河北", "河北省"],
+  "140000": ["山西", "山西省"],
+  "150000": ["内蒙古", "内蒙古自治区"],
+  "210000": ["辽宁", "辽宁省"],
+  "220000": ["吉林", "吉林省"],
+  "230000": ["黑龙江", "黑龙江省"],
+  "310000": ["上海", "上海市"],
+  "320000": ["江苏", "江苏省"],
+  "330000": ["浙江", "浙江省"],
+  "340000": ["安徽", "安徽省"],
+  "350000": ["福建", "福建省"],
+  "360000": ["江西", "江西省"],
+  "370000": ["山东", "山东省"],
+  "410000": ["河南", "河南省"],
+  "420000": ["湖北", "湖北省"],
+  "430000": ["湖南", "湖南省"],
+  "440000": ["广东", "广东省"],
+  "450000": ["广西", "广西壮族自治区"],
+  "460000": ["海南", "海南省"],
+  "500000": ["重庆", "重庆市"],
+  "510000": ["四川", "四川省"],
+  "520000": ["贵州", "贵州省"],
+  "530000": ["云南", "云南省"],
+  "540000": ["西藏", "西藏自治区"],
+  "610000": ["陕西", "陕西省"],
+  "620000": ["甘肃", "甘肃省"],
+  "630000": ["青海", "青海省"],
+  "640000": ["宁夏", "宁夏回族自治区"],
+  "650000": ["新疆", "新疆维吾尔自治区"],
+  "710000": ["台湾", "台湾省"],
+  "810000": ["香港", "香港特别行政区"],
+  "820000": ["澳门", "澳门特别行政区"],
+};
+
+const PROVINCE_UNIQUE_PALETTE = [
+  { fill: "#e8f2ff", stroke: "#8aa7d6" },
+  { fill: "#e6f8ef", stroke: "#7dbf9d" },
+  { fill: "#fff4e5", stroke: "#d9b27b" },
+  { fill: "#f1ecff", stroke: "#a194d6" },
+  { fill: "#ffecec", stroke: "#d69a9a" },
+  { fill: "#ebf6f8", stroke: "#85b4be" },
+  { fill: "#f7f0e8", stroke: "#bfa58b" },
+  { fill: "#eef8e6", stroke: "#9fbe7c" },
+  { fill: "#fff0f8", stroke: "#d39ac4" },
+  { fill: "#eaf0ff", stroke: "#8ea3d9" },
+  { fill: "#f2fff0", stroke: "#95c294" },
+  { fill: "#fff8e8", stroke: "#d3bc87" },
+];
+
+const CHINA_AUTONOMOUS_ETHNIC_KEYWORDS = [
+  "土家族苗族",
+  "蒙古族藏族",
+  "哈尼族彝族",
+  "傣族景颇族",
+  "柯尔克孜",
+  "哈萨克",
+  "蒙古族",
+  "朝鲜族",
+  "藏族",
+  "白族",
+  "彝族",
+  "苗族",
+  "回族",
+  "壮族",
+  "傣族",
+  "黎族",
+  "羌族",
+  "土家族",
+  "哈尼族",
+  "满族",
+  "侗族",
+  "布依族",
+];
+
+function normalizePlaceName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\s\-_.;,:'"`~!?@#$%^&*()+={}\[\]<>\\/|，。；：、（）【】《》]/g, "");
+}
+
+function parsePlaceNames(rawText) {
+  if (!rawText) return [];
+  const tokens = rawText
+    .split(/[\n\r,，;；、]+/g)
+    .map(x => x.trim())
+    .filter(Boolean);
+  const unique = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    const key = normalizePlaceName(token);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(token);
+  }
+  return unique;
+}
+
+function expandPlaceTokens(rawName) {
+  const normalized = normalizePlaceName(rawName);
+  const expanded = new Set([normalized]);
+  const override = PLACE_ALIAS_OVERRIDES[rawName] || PLACE_ALIAS_OVERRIDES[normalized];
+  if (Array.isArray(override)) {
+    for (const candidate of override) {
+      const c = normalizePlaceName(candidate);
+      if (c) expanded.add(c);
+    }
+  }
+  return Array.from(expanded);
+}
+
+function addAlias(aliasMap, alias, featureId) {
+  const key = normalizePlaceName(alias);
+  if (!key) return;
+  const variants = new Set([key]);
+  const suffixes = [
+    "特别行政区",
+    "维吾尔自治区",
+    "回族自治区",
+    "壮族自治区",
+    "自治区",
+    "省",
+    "市",
+    "地区",
+    "盟",
+    "州",
+  ];
+  for (const suffix of suffixes) {
+    const normSuffix = normalizePlaceName(suffix);
+    if (normSuffix && key.endsWith(normSuffix) && key.length > normSuffix.length) {
+      variants.add(key.slice(0, key.length - normSuffix.length));
+    }
+  }
+  const autonomous = normalizePlaceName("自治州");
+  if (key.endsWith(autonomous) && key.length > autonomous.length + 1) {
+    const base = key.slice(0, key.length - autonomous.length);
+    let bestIndex = Number.POSITIVE_INFINITY;
+    for (const token of CHINA_AUTONOMOUS_ETHNIC_KEYWORDS) {
+      const t = normalizePlaceName(token);
+      if (!t) continue;
+      const idx = base.indexOf(t);
+      if (idx >= 2 && idx < bestIndex) {
+        bestIndex = idx;
+      }
+    }
+    if (Number.isFinite(bestIndex)) {
+      const short = base.slice(0, bestIndex);
+      if (short) {
+        variants.add(short);
+      }
+    }
+  }
+  if (key.endsWith("federation") && key.length > "federation".length + 3) {
+    variants.add(key.replace(/federation$/, ""));
+  }
+  if (key.endsWith("province") && key.length > "province".length + 3) {
+    variants.add(key.replace(/province$/, ""));
+  }
+  if (key.endsWith("city") && key.length > "city".length + 2) {
+    variants.add(key.replace(/city$/, ""));
+  }
+  for (const variant of variants) {
+    if (!variant) continue;
+    if (!aliasMap.has(variant)) {
+      aliasMap.set(variant, new Set());
+    }
+    aliasMap.get(variant).add(featureId);
+  }
+}
+
+function featureDisplayName(feature) {
+  const props = feature?.properties || {};
+  return (
+    props.name ||
+    props.NAME ||
+    props.ADMIN ||
+    props.NAME_ZH ||
+    props.fullname ||
+    props._display_name ||
+    ""
+  );
+}
+
+function countryAliasesFromIso2(iso2) {
+  const code = String(iso2 || "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return [];
+  if (typeof Intl === "undefined" || typeof Intl.DisplayNames !== "function") {
+    return [code];
+  }
+
+  const out = new Set([code, code.toLowerCase()]);
+  const locales = ["zh-CN", "zh-Hans", "zh", "en"];
+  for (const locale of locales) {
+    try {
+      const formatter = new Intl.DisplayNames([locale], { type: "region" });
+      const text = formatter.of(code);
+      if (text && text !== code) {
+        out.add(String(text));
+      }
+    } catch (_) {
+      // Ignore locale-specific failures and continue.
+    }
+  }
+  return Array.from(out);
+}
+
+function featureAliasCandidates(feature) {
+  const props = feature?.properties || {};
+  const keys = [
+    "name",
+    "NAME",
+    "NAME_LONG",
+    "ADMIN",
+    "FORMAL_EN",
+    "NAME_ZH",
+    "fullname",
+    "NAME_CHINESE",
+    "iso_a2",
+    "ISO_A2",
+    "iso_a3",
+    "ISO_A3",
+    "adcode",
+  ];
+  const candidates = [];
+  for (const key of keys) {
+    const value = props[key];
+    if (typeof value === "string" || typeof value === "number") {
+      candidates.push(String(value));
+    }
+  }
+
+  const iso2 = props.iso_a2 || props.ISO_A2 || props.iso2 || props.ISO2 || "";
+  const iso2Aliases = countryAliasesFromIso2(iso2);
+  for (const alias of iso2Aliases) {
+    candidates.push(alias);
+  }
+
+  const source = String(props._source || "");
+  const adcodeRaw = props.adcode;
+  const adcode = String(adcodeRaw == null ? "" : adcodeRaw).trim().padStart(6, "0");
+  if (source.startsWith("china_") && CHINA_PROVINCE_ALIAS_OVERRIDES[adcode]) {
+    for (const alias of CHINA_PROVINCE_ALIAS_OVERRIDES[adcode]) {
+      candidates.push(alias);
+    }
+  }
+  return candidates;
+}
+
+async function fetchBoundaryGeoJson(path) {
+  const resp = await fetch(path);
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(text || `请求失败: ${path}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`边界数据解析失败: ${path}`);
+  }
+}
+
+function collectBoundaryFeatures(rawFeatures, sourceKey) {
+  const merged = [];
+  let sequence = 0;
+  const rows = Array.isArray(rawFeatures) ? rawFeatures : [];
+  for (const feature of rows) {
+    if (!feature || feature.type !== "Feature" || !feature.geometry) continue;
+    const cloned = {
+      type: "Feature",
+      geometry: feature.geometry,
+      properties: { ...(feature.properties || {}) },
+    };
+    const displayName = featureDisplayName(cloned);
+    const featureId = `${sourceKey}:${sequence}`;
+    sequence += 1;
+    cloned.properties._feature_id = featureId;
+    cloned.properties._source = sourceKey;
+    cloned.properties._display_name = displayName || featureId;
+    merged.push(cloned);
+  }
+  return merged;
+}
+
+function rebuildBoundaryIndex(features) {
+  const aliasMap = new Map();
+  for (const feature of features) {
+    const featureId = feature?.properties?._feature_id;
+    if (!featureId) continue;
+    const aliases = featureAliasCandidates(feature);
+    for (const alias of aliases) {
+      addAlias(aliasMap, alias, featureId);
+    }
+    addAlias(aliasMap, feature?.properties?._display_name || "", featureId);
+  }
+  return aliasMap;
+}
+
+function regionScopeLabel(scope) {
+  if (scope === "china_province") return "中国省份";
+  if (scope === "china_prefecture") return "中国地级市";
+  return "全球国家";
+}
+
+function regionScopeFileLabel(scope) {
+  if (scope === "china_province") return "china-provinces";
+  if (scope === "china_prefecture") return "china-prefecture";
+  return "global-countries";
+}
+
+function isSelectiveRegionScope(scope) {
+  return scope === "global" || scope === "china_province";
+}
+
+function getProvinceCodeFromAdcode(adcode) {
+  if (!adcode || adcode.length !== 6) return "";
+  return `${adcode.slice(0, 2)}0000`;
+}
+
+function getProvinceChineseNameByCode(adcode) {
+  const aliases = CHINA_PROVINCE_ALIAS_OVERRIDES[adcode];
+  if (Array.isArray(aliases) && aliases.length) {
+    return aliases[0];
+  }
+  return "";
+}
+
+function buildPrefectureProvinceLabelFeatureIds(features) {
+  const byProvince = new Map();
+  for (const feature of features) {
+    const featureId = feature?.properties?._feature_id || "";
+    if (!featureId) continue;
+    const adcode = getFeatureAdcode(feature);
+    const provinceCode = getProvinceCodeFromAdcode(adcode);
+    if (!provinceCode) continue;
+    const { area } = featurePrimaryRing(feature);
+    const score = Number.isFinite(area) ? area : 0;
+    const prev = byProvince.get(provinceCode);
+    if (!prev || score > prev.score) {
+      byProvince.set(provinceCode, { featureId, score });
+    }
+  }
+  return new Set(Array.from(byProvince.values()).map(item => item.featureId));
+}
+
+function buildPrefectureFeatureProvinceCodeMap(features) {
+  const out = new Map();
+  for (const feature of features) {
+    const featureId = feature?.properties?._feature_id || "";
+    if (!featureId) continue;
+    const adcode = getFeatureAdcode(feature);
+    const provinceCode = getProvinceCodeFromAdcode(adcode) || adcode;
+    if (!provinceCode) continue;
+    out.set(featureId, provinceCode);
+  }
+  return out;
+}
+
+function buildProvinceCenterAnchorsFromProvinceFeatures(features) {
+  const anchors = new Map();
+  for (const feature of features) {
+    const adcode = getFeatureAdcode(feature);
+    const provinceCode = getProvinceCodeFromAdcode(adcode) || adcode;
+    if (!provinceCode) continue;
+    const anchor = getFeatureVisualCenterLonLat(feature);
+    if (!anchor) continue;
+    anchors.set(provinceCode, anchor);
+  }
+  return anchors;
+}
+
+function createSyntheticPrefectureFromProvinceFeature(feature, seq) {
+  const props = feature?.properties || {};
+  const adcode = getFeatureAdcode(feature);
+  if (!adcode || !feature?.geometry) return null;
+  return {
+    type: "Feature",
+    geometry: feature.geometry,
+    properties: {
+      ...props,
+      _source: "china_prefecture_synthetic",
+      _display_name: props.name || props.fullname || adcode,
+      _synthetic_prefecture: true,
+      _synthetic_seq: seq,
+      level: "city",
+      adcode,
+    },
+  };
+}
+
+function getRenderableBoundaryFeatures() {
+  return getCurrentBoundaryFeatures();
+}
+
+function refreshRegionLayerData() {
+  refreshPrefectureProvinceMatchCache();
+  state.regionLayer.clearLayers();
+  state.regionLayer.addData(getRenderableBoundaryFeatures());
+  applyRegionStyles();
+  refreshRegionHighlightLayer();
+}
+
+function refreshPrefectureProvinceMatchCache() {
+  if (state.regionScope !== "china_prefecture") {
+    state.activePrefectureProvinceCodes = new Set();
+    return;
+  }
+  const codes = new Set();
+  for (const featureId of state.activeRegionFeatureIds) {
+    const provinceCode = state.chinaPrefectureFeatureProvinceCodes.get(featureId);
+    if (provinceCode) {
+      codes.add(provinceCode);
+    }
+  }
+  state.activePrefectureProvinceCodes = codes;
+}
+
+function getCurrentBoundaryFeatures() {
+  if (state.regionScope === "china_province") {
+    return state.chinaProvinceBoundaryFeatures;
+  }
+  if (state.regionScope === "china_prefecture") {
+    return state.chinaPrefectureBoundaryFeatures;
+  }
+  return state.worldBoundaryFeatures;
+}
+
+function getCurrentBoundaryAliasIndex() {
+  if (state.regionScope === "china_province") {
+    return state.chinaProvinceAliasIndex;
+  }
+  if (state.regionScope === "china_prefecture") {
+    return state.chinaPrefectureAliasIndex;
+  }
+  return state.worldAliasIndex;
+}
+
+async function ensureBoundaryDataLoaded(scope) {
+  if (scope === "global") {
+    if (!state.worldBoundaries) {
+      state.worldBoundaries = await fetchBoundaryGeoJson("/api/boundaries/world");
+    }
+    if (!state.worldBoundaryFeatures.length) {
+      const features = collectBoundaryFeatures(state.worldBoundaries?.features, "world");
+      state.worldBoundaryFeatures = features;
+      state.worldAliasIndex = rebuildBoundaryIndex(features);
+    }
+    return;
+  }
+
+  if (scope === "china_province") {
+    if (!state.chinaProvinceBoundaries) {
+      state.chinaProvinceBoundaries = await fetchBoundaryGeoJson("/api/boundaries/china-provinces");
+    }
+    if (!state.chinaProvinceBoundaryFeatures.length) {
+      const features = collectBoundaryFeatures(state.chinaProvinceBoundaries?.features, "china_province");
+      state.chinaProvinceBoundaryFeatures = features;
+      state.chinaProvinceAliasIndex = rebuildBoundaryIndex(features);
+    }
+    return;
+  }
+
+  if (scope === "china_prefecture") {
+    if (!state.chinaPrefectureBoundaries) {
+      state.chinaPrefectureBoundaries = await fetchBoundaryGeoJson("/api/boundaries/china-prefecture-cities");
+    }
+    await ensureBoundaryDataLoaded("china_province");
+    if (!state.chinaPrefectureBoundaryFeatures.length) {
+      const features = collectBoundaryFeatures(state.chinaPrefectureBoundaries?.features, "china_prefecture");
+      const existingCodes = new Set(features.map(getFeatureAdcode).filter(Boolean));
+      const missingSpecial = ["810000", "820000"].filter(code => !existingCodes.has(code));
+      if (missingSpecial.length) {
+        let seq = 0;
+        for (const code of missingSpecial) {
+          const provinceFeature = state.chinaProvinceBoundaryFeatures.find(
+            feature => getFeatureAdcode(feature) === code
+          );
+          if (!provinceFeature) continue;
+          seq += 1;
+          const synthetic = createSyntheticPrefectureFromProvinceFeature(provinceFeature, seq);
+          if (synthetic) {
+            synthetic.properties._feature_id = `china_prefecture:synthetic-${code}`;
+            features.push(synthetic);
+          }
+        }
+      }
+      state.chinaPrefectureBoundaryFeatures = features;
+      state.chinaPrefectureAliasIndex = rebuildBoundaryIndex(features);
+      state.chinaPrefectureProvinceLabelFeatureIds = buildPrefectureProvinceLabelFeatureIds(features);
+      state.chinaPrefectureFeatureProvinceCodes = buildPrefectureFeatureProvinceCodeMap(features);
+    }
+    state.chinaPrefectureProvinceLabelAnchors =
+      buildProvinceCenterAnchorsFromProvinceFeatures(state.chinaProvinceBoundaryFeatures);
+    return;
+  }
+
+  throw new Error(`未知区域范围: ${scope}`);
+}
+
+function applyRegionStyles() {
+  state.regionLayer.setStyle(feature => {
+    return getFeatureRegionStyle(feature, state.regionScope);
+  });
+}
+
+function renderUnmatchedPlaces(unmatched) {
+  el.placeUnmatchedList.innerHTML = "";
+  if (!unmatched.length) {
+    el.placeUnmatchedList.innerHTML = '<div class="summary">全部地名已匹配到区域</div>';
+    return;
+  }
+  for (const name of unmatched) {
+    const row = document.createElement("div");
+    row.className = "summary";
+    row.textContent = `未匹配：${name}`;
+    el.placeUnmatchedList.appendChild(row);
+  }
+}
+
+function fitMapToHighlightedRegions() {
+  const layers = [];
+  state.regionLayer.eachLayer(layer => {
+    const featureId = layer?.feature?.properties?._feature_id;
+    if (featureId && state.activeRegionFeatureIds.has(featureId)) {
+      layers.push(layer);
+    }
+  });
+  if (!layers.length) {
+    if (state.regionScope === "china_province" || state.regionScope === "china_prefecture") {
+      state.map.setView([35, 104], 4);
+    } else {
+      state.map.setView([20, 0], 2);
+    }
+    return;
+  }
+  const bounds = L.featureGroup(layers).getBounds();
+  if (bounds.isValid()) {
+    state.map.fitBounds(bounds.pad(0.15), { maxZoom: 6 });
+  }
+}
+
+function renderSheetTabs() {
+  const mediaActive = state.activeSheet === "media";
+  el.mediaSheet.classList.toggle("active", mediaActive);
+  el.regionSheet.classList.toggle("active", !mediaActive);
+  el.mediaSheetTab.classList.toggle("active", mediaActive);
+  el.regionSheetTab.classList.toggle("active", !mediaActive);
+}
+
+function renderRegionScopeTabs() {
+  const globalActive = state.regionScope === "global";
+  const provinceActive = state.regionScope === "china_province";
+  const prefectureActive = state.regionScope === "china_prefecture";
+  el.globalScopeTab.classList.toggle("active", globalActive);
+  el.chinaProvinceScopeTab.classList.toggle("active", provinceActive);
+  el.chinaPrefectureScopeTab.classList.toggle("active", prefectureActive);
+  if (globalActive) {
+    el.chinaScopeHint.style.display = "none";
+    return;
+  }
+  el.chinaScopeHint.style.display = "block";
+  el.chinaScopeHint.textContent = prefectureActive
+    ? "中国地级市模式包含香港、澳门特别行政区。"
+    : "中国省份模式按省级行政区边界着色。";
+}
+
+async function loadActiveRegionScopeIntoLayer(resetHighlights = false) {
+  await ensureBoundaryDataLoaded(state.regionScope);
+  if (resetHighlights) {
+    state.activeRegionFeatureIds = new Set();
+    state.regionMatchFilterActive = false;
+  }
+  refreshRegionLayerData();
+  if (resetHighlights || state.activeRegionFeatureIds.size === 0) {
+    renderUnmatchedPlaces([]);
+    el.placeResultSummary.textContent = `当前为${regionScopeLabel(state.regionScope)}边界模式`;
+  }
+}
+
+async function switchSheet(target) {
+  if (target === "region") {
+    if (state.regionMode) {
+      state.activeSheet = "region";
+      renderSheetTabs();
+      return;
+    }
+    const ok = await enterRegionMode();
+    if (!ok) {
+      state.activeSheet = "media";
+      renderSheetTabs();
+      return;
+    }
+    state.activeSheet = "region";
+    renderSheetTabs();
+    return;
+  }
+
+  if (state.regionMode) {
+    exitRegionMode();
+  }
+  state.activeSheet = "media";
+  renderSheetTabs();
+}
+
+async function switchRegionScope(scope) {
+  if (!["global", "china_province", "china_prefecture"].includes(scope)) return;
+  if (state.regionScope === scope) return;
+  state.regionScope = scope;
+  renderRegionScopeTabs();
+  if (!state.regionMode) {
+    return;
+  }
+  try {
+    await loadActiveRegionScopeIntoLayer(true);
+    fitMapToHighlightedRegions();
+  } catch (error) {
+    alert(error.message || "切换区域范围失败");
+  }
+}
+
+async function enterRegionMode() {
+  try {
+    await loadActiveRegionScopeIntoLayer(false);
+  } catch (error) {
+    alert(error.message || "加载区域边界失败");
+    return false;
+  }
+
+  state.regionMode = true;
+  state.markersLayer.clearLayers();
+  Object.values(state.baseLayers).forEach(layer => {
+    if (state.map.hasLayer(layer)) {
+      state.map.removeLayer(layer);
+    }
+  });
+  if (state.mapLayerControl) {
+    state.map.removeControl(state.mapLayerControl);
+  }
+  if (!state.map.hasLayer(state.regionLayer)) {
+    state.regionLayer.addTo(state.map);
+  }
+  if (state.regionHighlightLayer && !state.map.hasLayer(state.regionHighlightLayer)) {
+    state.regionHighlightLayer.addTo(state.map);
+  }
+  fitMapToHighlightedRegions();
+  el.scanStatus.textContent = "区域模式已启用";
+  return true;
+}
+
+function exitRegionMode() {
+  state.regionMode = false;
+  if (state.regionHighlightLayer && state.map.hasLayer(state.regionHighlightLayer)) {
+    state.map.removeLayer(state.regionHighlightLayer);
+  }
+  if (state.map.hasLayer(state.regionLayer)) {
+    state.map.removeLayer(state.regionLayer);
+  }
+  if (state.mapLayerControl) {
+    state.mapLayerControl.addTo(state.map);
+  }
+  const defaultLayer = state.baseLayers["标准底图"];
+  if (defaultLayer && !state.map.hasLayer(defaultLayer)) {
+    defaultLayer.addTo(state.map);
+  }
+  renderMapMarkers();
+  el.scanStatus.textContent = "已返回媒体模式";
+}
+
+async function applyPlaceHighlight() {
+  const names = parsePlaceNames(el.placeTextInput.value);
+  if (!names.length) {
+    alert("请先输入或上传地名列表");
+    return;
+  }
+
+  const ok = await enterRegionMode();
+  if (!ok) return;
+  state.activeSheet = "region";
+  renderSheetTabs();
+  renderRegionScopeTabs();
+  const matched = new Set();
+  const unmatched = [];
+  const aliasIndex = getCurrentBoundaryAliasIndex();
+
+  for (const rawName of names) {
+    const tokens = expandPlaceTokens(rawName);
+    let found = false;
+    for (const token of tokens) {
+      const ids = aliasIndex.get(token);
+      if (!ids || !ids.size) continue;
+      for (const id of ids) {
+        matched.add(id);
+      }
+      found = true;
+    }
+    if (!found) {
+      unmatched.push(rawName);
+    }
+  }
+
+  state.activeRegionFeatureIds = matched;
+  state.regionMatchFilterActive = true;
+  refreshRegionLayerData();
+  fitMapToHighlightedRegions();
+  renderUnmatchedPlaces(unmatched);
+  const scopeText = regionScopeLabel(state.regionScope);
+  el.placeResultSummary.textContent =
+    `范围 ${scopeText}：输入 ${names.length} 个地名，匹配 ${names.length - unmatched.length}，未匹配 ${unmatched.length}`;
+}
+
+function clearPlaceHighlight() {
+  state.activeRegionFeatureIds = new Set();
+  state.regionMatchFilterActive = false;
+  refreshRegionLayerData();
+  renderUnmatchedPlaces([]);
+  el.placeResultSummary.textContent = "已清除地名着色";
+}
+
+function getGeometryPolygons(geometry) {
+  if (!geometry || !Array.isArray(geometry.coordinates)) return [];
+  if (geometry.type === "Polygon") return [geometry.coordinates];
+  if (geometry.type === "MultiPolygon") return geometry.coordinates;
+  return [];
+}
+
+function forEachGeometryPoint(geometry, callback) {
+  const polygons = getGeometryPolygons(geometry);
+  for (const polygon of polygons) {
+    if (!Array.isArray(polygon)) continue;
+    for (const ring of polygon) {
+      if (!Array.isArray(ring)) continue;
+      for (const point of ring) {
+        if (!Array.isArray(point) || point.length < 2) continue;
+        const lon = Number(point[0]);
+        const lat = Number(point[1]);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+        callback(lon, lat);
+      }
+    }
+  }
+}
+
+function computeFeatureGeoBounds(features) {
+  let minLon = Infinity;
+  let maxLon = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  for (const feature of features) {
+    forEachGeometryPoint(feature?.geometry, (lon, lat) => {
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    });
+  }
+  if (!Number.isFinite(minLon) || !Number.isFinite(maxLon) || !Number.isFinite(minLat) || !Number.isFinite(maxLat)) {
+    return null;
+  }
+  return { minLon, maxLon, minLat, maxLat };
+}
+
+function getExportGeoBounds(scope, features) {
+  if (scope === "global") {
+    return { minLon: -180, maxLon: 180, minLat: -60, maxLat: 85 };
+  }
+  if (scope === "china_province") {
+    return { minLon: 73, maxLon: 136, minLat: 17, maxLat: 54 };
+  }
+  const computed = computeFeatureGeoBounds(features);
+  if (!computed) {
+    return { minLon: 73, maxLon: 136, minLat: 17, maxLat: 54 };
+  }
+  const lonPad = (computed.maxLon - computed.minLon) * 0.06 || 1;
+  const latPad = (computed.maxLat - computed.minLat) * 0.08 || 1;
+  return {
+    minLon: computed.minLon - lonPad,
+    maxLon: computed.maxLon + lonPad,
+    minLat: computed.minLat - latPad,
+    maxLat: computed.maxLat + latPad,
+  };
+}
+
+function computeExportCanvasSize(bounds) {
+  const xSpan = Math.max(
+    Math.abs(mercatorXFromLon(bounds.maxLon) - mercatorXFromLon(bounds.minLon)),
+    1e-9
+  );
+  const ySpan = Math.max(
+    Math.abs(mercatorYFromLat(bounds.maxLat) - mercatorYFromLat(bounds.minLat)),
+    1e-9
+  );
+  const aspect = xSpan / ySpan;
+  const longSide = 4096;
+  const shortSideTarget = 1800;
+  if (aspect >= 1) {
+    let width = longSide;
+    let height = Math.max(1, Math.round(width / aspect));
+    if (height < shortSideTarget) {
+      const scale = shortSideTarget / height;
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+    }
+    return { width, height };
+  }
+  let height = longSide;
+  let width = Math.max(1, Math.round(height * aspect));
+  if (width < shortSideTarget) {
+    const scale = shortSideTarget / width;
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+  }
+  return { width, height };
+}
+
+function clampMercatorLat(lat) {
+  const v = Number(lat);
+  if (!Number.isFinite(v)) return 0;
+  const max = 85.05112878;
+  if (v > max) return max;
+  if (v < -max) return -max;
+  return v;
+}
+
+function mercatorXFromLon(lon) {
+  return (Number(lon) * Math.PI) / 180;
+}
+
+function mercatorYFromLat(lat) {
+  const c = clampMercatorLat(lat);
+  const rad = (c * Math.PI) / 180;
+  return Math.log(Math.tan(Math.PI / 4 + rad / 2));
+}
+
+function projectLonLatToCanvas(lon, lat, bounds, width, height, padding) {
+  const xMin = mercatorXFromLon(bounds.minLon);
+  const xMax = mercatorXFromLon(bounds.maxLon);
+  const xVal = mercatorXFromLon(lon);
+  const xRatio = (xVal - xMin) / Math.max(xMax - xMin, 1e-9);
+
+  const yTop = mercatorYFromLat(bounds.maxLat);
+  const yBottom = mercatorYFromLat(bounds.minLat);
+  const yVal = mercatorYFromLat(lat);
+  const yRatio = (yTop - yVal) / Math.max(yTop - yBottom, 1e-9);
+  return {
+    x: padding + xRatio * (width - padding * 2),
+    y: padding + yRatio * (height - padding * 2),
+  };
+}
+
+function ringSignedArea(ring) {
+  if (!Array.isArray(ring) || ring.length < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < ring.length; i += 1) {
+    const cur = ring[i];
+    const next = ring[(i + 1) % ring.length];
+    const x0 = Number(cur?.[0]);
+    const y0 = Number(cur?.[1]);
+    const x1 = Number(next?.[0]);
+    const y1 = Number(next?.[1]);
+    if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) {
+      continue;
+    }
+    sum += x0 * y1 - x1 * y0;
+  }
+  return sum / 2;
+}
+
+function ringBoundsCenter(ring) {
+  let minLon = Infinity;
+  let maxLon = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  for (const point of ring || []) {
+    const lon = Number(point?.[0]);
+    const lat = Number(point?.[1]);
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  }
+  if (!Number.isFinite(minLon) || !Number.isFinite(maxLon) || !Number.isFinite(minLat) || !Number.isFinite(maxLat)) {
+    return null;
+  }
+  return [(minLon + maxLon) / 2, (minLat + maxLat) / 2];
+}
+
+function ringCentroid(ring) {
+  const area = ringSignedArea(ring);
+  if (Math.abs(area) < 1e-9) {
+    return ringBoundsCenter(ring);
+  }
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < ring.length; i += 1) {
+    const cur = ring[i];
+    const next = ring[(i + 1) % ring.length];
+    const x0 = Number(cur?.[0]);
+    const y0 = Number(cur?.[1]);
+    const x1 = Number(next?.[0]);
+    const y1 = Number(next?.[1]);
+    if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) {
+      continue;
+    }
+    const cross = x0 * y1 - x1 * y0;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  const k = 1 / (6 * area);
+  return [cx * k, cy * k];
+}
+
+function featurePrimaryRing(feature) {
+  const polygons = getGeometryPolygons(feature?.geometry);
+  let bestRing = null;
+  let bestArea = -1;
+  for (const polygon of polygons) {
+    if (!Array.isArray(polygon) || !Array.isArray(polygon[0])) continue;
+    const outer = polygon[0];
+    const area = Math.abs(ringSignedArea(outer));
+    if (area > bestArea) {
+      bestArea = area;
+      bestRing = outer;
+    }
+  }
+  return { ring: bestRing, area: bestArea };
+}
+
+function isPointInRing(lon, lat, ring) {
+  if (!Array.isArray(ring) || ring.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const xi = Number(ring[i]?.[0]);
+    const yi = Number(ring[i]?.[1]);
+    const xj = Number(ring[j]?.[0]);
+    const yj = Number(ring[j]?.[1]);
+    if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) {
+      continue;
+    }
+    const dy = yj - yi;
+    const safeDy = Math.abs(dy) < 1e-12 ? (dy >= 0 ? 1e-12 : -1e-12) : dy;
+    const intersect =
+      yi > lat !== yj > lat &&
+      lon < ((xj - xi) * (lat - yi)) / safeDy + xi;
+    if (intersect) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function isPointInPolygon(lon, lat, polygon) {
+  if (!Array.isArray(polygon) || !Array.isArray(polygon[0])) return false;
+  if (!isPointInRing(lon, lat, polygon[0])) return false;
+  for (let i = 1; i < polygon.length; i += 1) {
+    if (isPointInRing(lon, lat, polygon[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isPointInGeometry(lon, lat, geometry) {
+  const polygons = getGeometryPolygons(geometry);
+  for (const polygon of polygons) {
+    if (isPointInPolygon(lon, lat, polygon)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getFeatureLabelLonLat(feature) {
+  const { ring } = featurePrimaryRing(feature);
+  if (!ring || !ring.length) return null;
+
+  const centroid = ringCentroid(ring);
+  if (centroid && isPointInGeometry(centroid[0], centroid[1], feature?.geometry)) {
+    return centroid;
+  }
+
+  const center = ringBoundsCenter(ring);
+  if (center && isPointInGeometry(center[0], center[1], feature?.geometry)) {
+    return center;
+  }
+
+  for (const point of ring) {
+    const lon = Number(point?.[0]);
+    const lat = Number(point?.[1]);
+    if (Number.isFinite(lon) && Number.isFinite(lat)) {
+      return [lon, lat];
+    }
+  }
+  return null;
+}
+
+function getFeatureBoundsCenterLonLat(feature) {
+  const polygons = getGeometryPolygons(feature?.geometry);
+  let minLon = Number.POSITIVE_INFINITY;
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLon = Number.NEGATIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
+  for (const polygon of polygons) {
+    for (const ring of polygon) {
+      for (const point of ring) {
+        const lon = Number(point?.[0]);
+        const lat = Number(point?.[1]);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+        minLon = Math.min(minLon, lon);
+        minLat = Math.min(minLat, lat);
+        maxLon = Math.max(maxLon, lon);
+        maxLat = Math.max(maxLat, lat);
+      }
+    }
+  }
+  if (!Number.isFinite(minLon) || !Number.isFinite(minLat) || !Number.isFinite(maxLon) || !Number.isFinite(maxLat)) {
+    return null;
+  }
+  const center = [(minLon + maxLon) / 2, (minLat + maxLat) / 2];
+  if (isPointInGeometry(center[0], center[1], feature?.geometry)) {
+    return center;
+  }
+  return null;
+}
+
+function pointToSegmentDistanceSq(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  if (dx === 0 && dy === 0) {
+    const sx = px - ax;
+    const sy = py - ay;
+    return sx * sx + sy * sy;
+  }
+  const t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
+  const clamped = Math.max(0, Math.min(1, t));
+  const cx = ax + clamped * dx;
+  const cy = ay + clamped * dy;
+  const sx = px - cx;
+  const sy = py - cy;
+  return sx * sx + sy * sy;
+}
+
+function pointToRingSignedDistance(lon, lat, ring) {
+  let inside = false;
+  let minDistSq = Number.POSITIVE_INFINITY;
+  const n = ring.length;
+  if (n < 2) return Number.NEGATIVE_INFINITY;
+  let j = n - 1;
+  for (let i = 0; i < n; i += 1) {
+    const a = ring[i];
+    const b = ring[j];
+    const ax = Number(a?.[0]);
+    const ay = Number(a?.[1]);
+    const bx = Number(b?.[0]);
+    const by = Number(b?.[1]);
+    if (!Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(bx) || !Number.isFinite(by)) {
+      j = i;
+      continue;
+    }
+    const intersect =
+      ay > lat !== by > lat &&
+      lon < ((bx - ax) * (lat - ay)) / ((by - ay) || Number.EPSILON) + ax;
+    if (intersect) inside = !inside;
+    minDistSq = Math.min(minDistSq, pointToSegmentDistanceSq(lon, lat, ax, ay, bx, by));
+    j = i;
+  }
+  if (!Number.isFinite(minDistSq)) return Number.NEGATIVE_INFINITY;
+  const dist = Math.sqrt(minDistSq);
+  return inside ? dist : -dist;
+}
+
+function polylabelForRing(ring, precision = 0.05) {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const p of ring) {
+    const x = Number(p?.[0]);
+    const y = Number(p?.[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return null;
+  }
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const cellSize = Math.min(width, height);
+  if (cellSize <= 0) {
+    return [minX, minY];
+  }
+  const h = cellSize / 2;
+  const queue = [];
+  for (let x = minX; x < maxX; x += cellSize) {
+    for (let y = minY; y < maxY; y += cellSize) {
+      const cx = x + h;
+      const cy = y + h;
+      const d = pointToRingSignedDistance(cx, cy, ring);
+      queue.push({ x: cx, y: cy, h, d, max: d + h * Math.SQRT2 });
+    }
+  }
+  const centroid = ringCentroid(ring);
+  let best = null;
+  if (centroid && Number.isFinite(centroid[0]) && Number.isFinite(centroid[1])) {
+    const d = pointToRingSignedDistance(centroid[0], centroid[1], ring);
+    best = { x: centroid[0], y: centroid[1], h: 0, d, max: d };
+  }
+  const boxCenter = {
+    x: (minX + maxX) / 2,
+    y: (minY + maxY) / 2,
+    h: 0,
+    d: pointToRingSignedDistance((minX + maxX) / 2, (minY + maxY) / 2, ring),
+    max: 0,
+  };
+  boxCenter.max = boxCenter.d;
+  if (!best || boxCenter.d > best.d) {
+    best = boxCenter;
+  }
+
+  const eps = Math.max(precision, cellSize / 120);
+  while (queue.length) {
+    queue.sort((a, b) => b.max - a.max);
+    const cell = queue.shift();
+    if (!cell) break;
+    if (cell.d > best.d) {
+      best = cell;
+    }
+    if (cell.max - best.d <= eps) {
+      continue;
+    }
+    const nh = cell.h / 2;
+    if (nh <= 0) continue;
+    const candidates = [
+      { x: cell.x - nh, y: cell.y - nh, h: nh },
+      { x: cell.x + nh, y: cell.y - nh, h: nh },
+      { x: cell.x - nh, y: cell.y + nh, h: nh },
+      { x: cell.x + nh, y: cell.y + nh, h: nh },
+    ];
+    for (const c of candidates) {
+      const d = pointToRingSignedDistance(c.x, c.y, ring);
+      queue.push({ ...c, d, max: d + c.h * Math.SQRT2 });
+    }
+  }
+  if (!best || !Number.isFinite(best.x) || !Number.isFinite(best.y)) {
+    return null;
+  }
+  return [best.x, best.y];
+}
+
+function getFeatureVisualCenterLonLat(feature) {
+  const { ring } = featurePrimaryRing(feature);
+  if (ring && ring.length >= 3) {
+    const anchor = polylabelForRing(ring, 0.03);
+    if (anchor && isPointInGeometry(anchor[0], anchor[1], feature?.geometry)) {
+      return anchor;
+    }
+  }
+  return getFeatureBoundsCenterLonLat(feature) || getFeatureLabelLonLat(feature);
+}
+
+function getFeatureLabelAnchorForScope(feature, scope) {
+  if (scope === "china_prefecture") {
+    const adcode = getFeatureAdcode(feature);
+    const provinceCode = getProvinceCodeFromAdcode(adcode) || adcode;
+    const provinceAnchor = state.chinaPrefectureProvinceLabelAnchors.get(provinceCode);
+    if (provinceAnchor) {
+      return provinceAnchor;
+    }
+  }
+  return getFeatureLabelLonLat(feature);
+}
+
+function getGlobalChineseName(feature) {
+  const props = feature?.properties || {};
+  const iso2 = props.iso_a2 || props.ISO_A2 || props.iso2 || props.ISO2 || "";
+  const aliases = countryAliasesFromIso2(iso2);
+  const zh = aliases.find(text => /[\u4e00-\u9fff]/.test(String(text)));
+  if (zh) return String(zh);
+
+  const display = featureDisplayName(feature);
+  const displayNorm = normalizePlaceName(display);
+  for (const [cn, aliasList] of Object.entries(PLACE_ALIAS_OVERRIDES)) {
+    const hasMatch = aliasList.some(alias => normalizePlaceName(alias) === displayNorm);
+    if (hasMatch) return cn;
+  }
+  return display;
+}
+
+function getFeatureChineseLabel(feature, scope) {
+  if (scope === "global") {
+    return getGlobalChineseName(feature);
+  }
+  const props = feature?.properties || {};
+  const adcode = String(props.adcode == null ? "" : props.adcode).trim().padStart(6, "0");
+  if (scope === "china_province" && CHINA_PROVINCE_ALIAS_OVERRIDES[adcode]?.length) {
+    return CHINA_PROVINCE_ALIAS_OVERRIDES[adcode][0];
+  }
+  return "";
+}
+
+function getFeatureAdcode(feature) {
+  const raw = feature?.properties?.adcode;
+  return String(raw == null ? "" : raw).trim().padStart(6, "0");
+}
+
+function getLabelOffsetPx(feature, scope, base = 18) {
+  const code = getFeatureAdcode(feature);
+  if (scope === "china_prefecture") {
+    const provinceCode = getProvinceCodeFromAdcode(code) || code;
+    // Pearl River Delta dense label cluster: Guangdong / Hong Kong / Macau.
+    if (provinceCode === "440000") {
+      return { x: Math.round(base * -1.9), y: Math.round(base * -0.15) };
+    }
+    if (provinceCode === "810000") {
+      return { x: Math.round(base * 1.95), y: Math.round(base * -1.15) };
+    }
+    if (provinceCode === "820000") {
+      return { x: Math.round(base * 2.05), y: Math.round(base * 1.1) };
+    }
+    return { x: 0, y: 0 };
+  }
+  if (scope !== "china_province") {
+    return { x: 0, y: 0 };
+  }
+  // Dense North China cluster: Hebei / Beijing / Tianjin.
+  if (code === "110000") {
+    return { x: Math.round(base * -1.55), y: Math.round(base * -0.95) };
+  }
+  if (code === "120000") {
+    return { x: Math.round(base * 1.45), y: Math.round(base * -1.05) };
+  }
+  if (code === "130000") {
+    return { x: Math.round(base * 0), y: Math.round(base * 1.2) };
+  }
+  if (code === "810000") {
+    return { x: Math.round(base * 1.2), y: Math.round(base * -0.7) };
+  }
+  if (code === "820000") {
+    return { x: Math.round(base * -1.2), y: Math.round(base * 0.9) };
+  }
+  return { x: 0, y: 0 };
+}
+
+function getProvincePaletteStyle(provinceCode) {
+  const prefix = Number.parseInt(String(provinceCode || "").slice(0, 2), 10);
+  const seed = Number.isFinite(prefix) ? prefix : 0;
+  const idx = Math.abs(seed * 131 + 17) % PROVINCE_UNIQUE_PALETTE.length;
+  return PROVINCE_UNIQUE_PALETTE[idx];
+}
+
+function getFeatureRegionStyle(feature, scope) {
+  const featureId = feature?.properties?._feature_id || "";
+  const highlighted = state.activeRegionFeatureIds.has(featureId);
+
+  if (scope === "china_prefecture") {
+    const adcode = getFeatureAdcode(feature);
+    const provinceCode = getProvinceCodeFromAdcode(adcode) || adcode;
+    if (state.regionMatchFilterActive && !state.activePrefectureProvinceCodes.has(provinceCode)) {
+      return {
+        color: "#c6cdd3",
+        weight: 0.7,
+        fillColor: "#ffffff",
+        fillOpacity: 0.96,
+        opacity: 0.9,
+      };
+    }
+    const paletteStyle = getProvincePaletteStyle(provinceCode);
+    return {
+      color: paletteStyle.stroke,
+      weight: 0.7,
+      fillColor: paletteStyle.fill,
+      fillOpacity: 0.82,
+      opacity: 0.9,
+    };
+  }
+
+  return {
+    color: highlighted ? "#2f6f5a" : "#a7adb3",
+    weight: highlighted ? 1.6 : 0.7,
+    fillColor: highlighted ? "#63b59a" : "#ffffff",
+    fillOpacity: highlighted ? 0.78 : 0.92,
+    opacity: highlighted ? 1 : 0.8,
+  };
+}
+
+function getFeatureHighlightStyle(feature, scope) {
+  if (scope === "china_prefecture") {
+    return {
+      color: "#7d1f35",
+      weight: 2.2,
+      fillColor: "#ffffff",
+      fillOpacity: 0.01,
+      opacity: 1,
+    };
+  }
+  return {
+    color: "#7d1f35",
+    weight: 2.1,
+    fillColor: "#f7d6df",
+    fillOpacity: 0.2,
+    opacity: 1,
+  };
+}
+
+function ensureMapHatchPattern() {
+  const svg = state.map?.getPanes?.()?.overlayPane?.querySelector?.("svg");
+  if (!svg) return "";
+  const ns = "http://www.w3.org/2000/svg";
+  let defs = svg.querySelector("defs");
+  if (!defs) {
+    defs = document.createElementNS(ns, "defs");
+    svg.insertBefore(defs, svg.firstChild);
+  }
+  const patternId = "region-match-hatch";
+  let pattern = defs.querySelector(`#${patternId}`);
+  if (!pattern) {
+    pattern = document.createElementNS(ns, "pattern");
+    pattern.setAttribute("id", patternId);
+    pattern.setAttribute("patternUnits", "userSpaceOnUse");
+    pattern.setAttribute("width", "10");
+    pattern.setAttribute("height", "10");
+    pattern.setAttribute("patternTransform", "rotate(45)");
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("d", "M 0 0 L 0 10 M 5 0 L 5 10 M 10 0 L 10 10");
+    path.setAttribute("stroke", "#7d1f35");
+    path.setAttribute("stroke-width", "2");
+    path.setAttribute("stroke-opacity", "0.6");
+    pattern.appendChild(path);
+    defs.appendChild(pattern);
+  }
+  return patternId;
+}
+
+function applyHatchPatternToLayerPath(layer) {
+  const path = layer?._path;
+  if (!path) return;
+  const patternId = ensureMapHatchPattern();
+  if (!patternId) return;
+  path.setAttribute("fill", `url(#${patternId})`);
+  path.setAttribute("fill-opacity", "1");
+}
+
+function refreshRegionHighlightLayer() {
+  if (!state.regionHighlightLayer) return;
+  state.regionHighlightLayer.clearLayers();
+  if (!state.activeRegionFeatureIds.size) return;
+  const highlights = getCurrentBoundaryFeatures().filter(feature =>
+    state.activeRegionFeatureIds.has(feature?.properties?._feature_id || "")
+  );
+  if (!highlights.length) return;
+  state.regionHighlightLayer.addData(highlights);
+}
+
+function getFeatureMapLabel(feature, scope) {
+  if (scope === "china_prefecture") {
+    const featureId = feature?.properties?._feature_id || "";
+    if (!state.chinaPrefectureProvinceLabelFeatureIds.has(featureId)) {
+      return "";
+    }
+    const adcode = getFeatureAdcode(feature);
+    const provinceCode = getProvinceCodeFromAdcode(adcode);
+    return (
+      getProvinceChineseNameByCode(provinceCode) ||
+      getProvinceChineseNameByCode(adcode) ||
+      ""
+    );
+  }
+
+  if (!isSelectiveRegionScope(scope)) {
+    return "";
+  }
+  const featureId = feature?.properties?._feature_id || "";
+  const shouldFilterByMatched = scope === "global";
+  if (shouldFilterByMatched && state.activeRegionFeatureIds.size > 0 && !state.activeRegionFeatureIds.has(featureId)) {
+    return "";
+  }
+  const { area } = featurePrimaryRing(feature);
+  if (scope === "global" && area > 0 && area < 0.5) {
+    return "";
+  }
+  return getFeatureChineseLabel(feature, scope).trim();
+}
+
+function escapeXml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function svgNum(value) {
+  return Number(value).toFixed(2);
+}
+
+function buildSvgPathData(geometry, bounds, width, height, padding) {
+  const polygons = getGeometryPolygons(geometry);
+  const parts = [];
+  for (const polygon of polygons) {
+    if (!Array.isArray(polygon)) continue;
+    for (const ring of polygon) {
+      if (!Array.isArray(ring) || !ring.length) continue;
+      const points = [];
+      for (const point of ring) {
+        if (!Array.isArray(point) || point.length < 2) continue;
+        const lon = Number(point[0]);
+        const lat = Number(point[1]);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+        const p = projectLonLatToCanvas(lon, lat, bounds, width, height, padding);
+        points.push(p);
+      }
+      if (points.length < 3) continue;
+      parts.push(`M ${svgNum(points[0].x)} ${svgNum(points[0].y)}`);
+      for (let i = 1; i < points.length; i += 1) {
+        parts.push(`L ${svgNum(points[i].x)} ${svgNum(points[i].y)}`);
+      }
+      parts.push("Z");
+    }
+  }
+  return parts.join(" ");
+}
+
+async function exportRegionAsSvg() {
+  const ok = state.regionMode ? true : await enterRegionMode();
+  if (!ok) return;
+  const features = getRenderableBoundaryFeatures();
+  if (!Array.isArray(features) || !features.length) {
+    alert("当前没有可导出的区域边界");
+    return;
+  }
+
+  const bounds = getExportGeoBounds(state.regionScope, features);
+  const size = computeExportCanvasSize(bounds);
+  const width = size.width;
+  const height = size.height;
+  const padding = Math.round(Math.min(width, height) * 0.04);
+  const svgParts = [];
+  svgParts.push(`<?xml version="1.0" encoding="UTF-8"?>`);
+  svgParts.push(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
+  );
+  svgParts.push(
+    `<defs><pattern id="match-hatch" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)"><path d="M 0 0 L 0 10 M 5 0 L 5 10 M 10 0 L 10 10" stroke="#7d1f35" stroke-width="2" stroke-opacity="0.6"/></pattern></defs>`
+  );
+  svgParts.push(`<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`);
+
+  for (const feature of features) {
+    const style = getFeatureRegionStyle(feature, state.regionScope);
+    const path = buildSvgPathData(feature?.geometry, bounds, size.width, size.height, padding);
+    if (!path) continue;
+    svgParts.push(
+      `<path d="${path}" fill="${style.fillColor}" stroke="${style.color}" stroke-width="${style.weight}" fill-opacity="${style.fillOpacity}" stroke-opacity="${style.opacity}" fill-rule="evenodd"/>`
+    );
+  }
+
+  if (state.activeRegionFeatureIds.size) {
+    for (const feature of features) {
+      const featureId = feature?.properties?._feature_id || "";
+      if (!state.activeRegionFeatureIds.has(featureId)) continue;
+      const path = buildSvgPathData(feature?.geometry, bounds, size.width, size.height, padding);
+      if (!path) continue;
+      const hs = getFeatureHighlightStyle(feature, state.regionScope);
+      svgParts.push(
+        `<path d="${path}" fill="url(#match-hatch)" stroke="${hs.color}" stroke-width="${hs.weight}" fill-rule="evenodd" fill-opacity="1" stroke-opacity="${hs.opacity}"/>`
+      );
+    }
+  }
+
+  if (isSelectiveRegionScope(state.regionScope) || state.regionScope === "china_prefecture") {
+    const baseFont =
+      state.regionScope === "global"
+        ? Math.round(Math.min(width, height) * 0.018)
+        : Math.round(Math.min(width, height) * 0.022);
+    const fontSize = Math.max(14, baseFont);
+
+    for (const feature of features) {
+      const { ring, area } = featurePrimaryRing(feature);
+      if (!ring || area <= 0) continue;
+      if (state.regionScope === "global" && area < 0.55) continue;
+
+      const anchor = getFeatureLabelAnchorForScope(feature, state.regionScope);
+      if (!anchor) continue;
+      const [lon, lat] = anchor;
+      const p = projectLonLatToCanvas(lon, lat, bounds, size.width, size.height, padding);
+      const label = getFeatureMapLabel(feature, state.regionScope).trim();
+      if (!label) continue;
+      const labelOffset = getLabelOffsetPx(feature, state.regionScope, fontSize);
+      const lx = p.x + labelOffset.x;
+      const ly = p.y + labelOffset.y;
+      if (labelOffset.x !== 0 || labelOffset.y !== 0) {
+        svgParts.push(
+          `<line x1="${svgNum(p.x)}" y1="${svgNum(p.y)}" x2="${svgNum(lx)}" y2="${svgNum(ly)}" stroke="#406a5d" stroke-width="${Math.max(1.2, fontSize * 0.08)}" opacity="0.85"/>`
+        );
+      }
+      svgParts.push(
+        `<text x="${svgNum(lx)}" y="${svgNum(ly)}" text-anchor="middle" dominant-baseline="middle" font-size="${fontSize}" font-weight="600" font-family="PingFang SC, Microsoft YaHei, Noto Sans SC, sans-serif" fill="#183b31" stroke="rgba(255,255,255,0.9)" stroke-width="${Math.max(2, Math.round(fontSize * 0.28))}" paint-order="stroke fill">${escapeXml(label)}</text>`
+      );
+    }
+  }
+  svgParts.push(`</svg>`);
+
+  const scopeText = regionScopeFileLabel(state.regionScope);
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = `region-map-${scopeText}-${ts}.svg`;
+  const blob = new Blob([svgParts.join("\n")], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.download = filename;
+  link.href = url;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  el.scanStatus.textContent = `已导出 SVG：${filename}`;
+}
+
+function appendPlacesToInput(text) {
+  const incoming = parsePlaceNames(text);
+  if (!incoming.length) return;
+  const existing = parsePlaceNames(el.placeTextInput.value);
+  const merged = [...existing];
+  const seen = new Set(existing.map(normalizePlaceName));
+  for (const name of incoming) {
+    const key = normalizePlaceName(name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(name);
+  }
+  el.placeTextInput.value = merged.join("\n");
+}
+
+async function handlePlaceFileUpload(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    const content = await file.text();
+    appendPlacesToInput(content);
+    el.scanStatus.textContent = `已读取地名文件：${file.name}`;
+  } catch (error) {
+    alert("读取地名文件失败");
+  } finally {
+    event.target.value = "";
+  }
+}
+
 function updateSummary() {
   const located = state.allLocated.length;
   const unlocated = state.allUnlocated.length;
@@ -101,48 +1770,12 @@ function updateSummary() {
   el.summaryText.textContent = `总计 ${total}，已定位 ${located}，未定位 ${unlocated}`;
 }
 
-function itemPassesFilter(item) {
-  const keyword = el.keywordInput.value.trim().toLowerCase();
-  const type = el.typeSelect.value;
-  const fromDate = el.fromDate.value;
-  const toDate = el.toDate.value;
-
-  if (keyword && !item.name.toLowerCase().includes(keyword)) {
-    return false;
-  }
-  if (type !== "all" && item.type !== type) {
-    return false;
-  }
-
-  if (fromDate || toDate) {
-    const t = item.captured_at ? new Date(item.captured_at).getTime() : NaN;
-    if (Number.isNaN(t)) {
-      return false;
-    }
-    if (fromDate) {
-      const from = new Date(`${fromDate}T00:00:00`).getTime();
-      if (t < from) return false;
-    }
-    if (toDate) {
-      const to = new Date(`${toDate}T23:59:59`).getTime();
-      if (t > to) return false;
-    }
-  }
-
-  return true;
-}
-
-function applyFilters() {
-  state.filtered = state.allLocated.filter(itemPassesFilter);
-  renderMapMarkers();
-  renderUnlocated();
-}
-
 function applyScanPayload(payload) {
   state.allLocated = payload.items || [];
   state.allUnlocated = payload.unlocated || [];
   updateSummary();
-  applyFilters();
+  renderMapMarkers();
+  renderUnlocated();
 
   if (state.allLocated.length) {
     const bounds = L.latLngBounds(state.allLocated.map(item => [item.lat, item.lon]));
@@ -200,8 +1833,9 @@ function renderClusterList(items) {
 function renderMapMarkers() {
   if (!state.map) return;
   state.markersLayer.clearLayers();
+  if (state.regionMode) return;
 
-  const clusters = buildClusters(state.filtered);
+  const clusters = buildClusters(state.allLocated);
 
   for (const cluster of clusters) {
     const cover = cluster.items.find(item => item.type === "image") || cluster.items[0];
@@ -235,14 +1869,7 @@ function renderMapMarkers() {
 
 function renderUnlocated() {
   el.unlocatedList.innerHTML = "";
-  const keyword = el.keywordInput.value.trim().toLowerCase();
-  const type = el.typeSelect.value;
-
-  const rows = state.allUnlocated.filter(item => {
-    if (keyword && !item.name.toLowerCase().includes(keyword)) return false;
-    if (type !== "all" && item.type !== type) return false;
-    return true;
-  });
+  const rows = state.allUnlocated;
 
   if (!rows.length) {
     el.unlocatedList.innerHTML = '<div class="summary">无未定位文件</div>';
@@ -309,12 +1936,12 @@ function renderCacheList() {
 
 function updateCacheSummary(stats) {
   if (!stats) {
-    el.cacheSummary.textContent = "缓存：目录 0，元数据 0，缩略图 0，预览 0";
+    el.cacheSummary.textContent = "缓存：目录 0，元数据 0，缩略图 0，预览 0，边界 0";
     return;
   }
   el.cacheSummary.textContent =
     `缓存：目录 ${stats.scan_entries || 0}，元数据 ${stats.meta_entries || 0}，` +
-    `缩略图 ${stats.thumb_files || 0}，预览 ${stats.preview_files || 0}`;
+    `缩略图 ${stats.thumb_files || 0}，预览 ${stats.preview_files || 0}，边界 ${stats.boundary_files || 0}`;
 }
 
 async function refreshCacheList() {
@@ -426,7 +2053,6 @@ async function deleteCachedScan(scanId) {
       } else {
         state.allLocated = [];
         state.allUnlocated = [];
-        state.filtered = [];
         renderMapMarkers();
         renderClusterList([]);
         renderUnlocated();
@@ -441,7 +2067,7 @@ async function deleteCachedScan(scanId) {
 }
 
 async function clearAllCaches() {
-  if (!confirm("确认清空全部缓存？这会删除目录扫描记录、元数据缓存和缩略图缓存。")) return;
+  if (!confirm("确认清空全部缓存？这会删除目录扫描记录、元数据、缩略图、预览和边界缓存。")) return;
   try {
     const resp = await fetch("/api/cache/clear", { method: "POST" });
     const data = await resp.json();
@@ -450,9 +2076,26 @@ async function clearAllCaches() {
     }
     state.allLocated = [];
     state.allUnlocated = [];
-    state.filtered = [];
     state.selectedCacheIds = new Set();
     state.loadedCacheIds = new Set();
+    state.worldBoundaries = null;
+    state.chinaProvinceBoundaries = null;
+    state.chinaPrefectureBoundaries = null;
+    state.worldBoundaryFeatures = [];
+    state.chinaProvinceBoundaryFeatures = [];
+    state.chinaPrefectureBoundaryFeatures = [];
+    state.worldAliasIndex = new Map();
+    state.chinaProvinceAliasIndex = new Map();
+    state.chinaPrefectureAliasIndex = new Map();
+    state.chinaPrefectureProvinceLabelFeatureIds = new Set();
+    state.chinaPrefectureProvinceLabelAnchors = new Map();
+    state.chinaPrefectureFeatureProvinceCodes = new Map();
+    state.activePrefectureProvinceCodes = new Set();
+    state.regionScope = "global";
+    state.activeRegionFeatureIds = new Set();
+    state.regionMatchFilterActive = false;
+    state.regionHighlightLayer.clearLayers();
+    state.regionLayer.clearLayers();
     renderMapMarkers();
     renderClusterList([]);
     renderUnlocated();
@@ -460,6 +2103,7 @@ async function clearAllCaches() {
     state.cacheEntries = [];
     renderCacheList();
     syncSelectionState();
+    renderRegionScopeTabs();
     updateCacheSummary(data.stats || null);
     el.scanStatus.textContent = "缓存已清空";
   } catch (err) {
@@ -630,14 +2274,29 @@ async function startScan() {
 function bindEvents() {
   el.scanBtn.addEventListener("click", startScan);
   el.pickDirBtn.addEventListener("click", pickDirectory);
+  el.mediaSheetTab.addEventListener("click", () => {
+    switchSheet("media");
+  });
+  el.regionSheetTab.addEventListener("click", () => {
+    switchSheet("region");
+  });
+  el.globalScopeTab.addEventListener("click", () => {
+    switchRegionScope("global");
+  });
+  el.chinaProvinceScopeTab.addEventListener("click", () => {
+    switchRegionScope("china_province");
+  });
+  el.chinaPrefectureScopeTab.addEventListener("click", () => {
+    switchRegionScope("china_prefecture");
+  });
+  el.highlightPlacesBtn.addEventListener("click", applyPlaceHighlight);
+  el.clearHighlightsBtn.addEventListener("click", clearPlaceHighlight);
+  el.exportRegionSvgBtn.addEventListener("click", exportRegionAsSvg);
+  el.placeFileInput.addEventListener("change", handlePlaceFileUpload);
   el.refreshCacheBtn.addEventListener("click", refreshCacheList);
   el.loadSelectedCacheBtn.addEventListener("click", loadSelectedCaches);
   el.toggleSelectCacheBtn.addEventListener("click", toggleSelectAllCaches);
   el.clearCacheBtn.addEventListener("click", clearAllCaches);
-  el.keywordInput.addEventListener("input", applyFilters);
-  el.typeSelect.addEventListener("change", applyFilters);
-  el.fromDate.addEventListener("change", applyFilters);
-  el.toDate.addEventListener("change", applyFilters);
   el.closeModal.addEventListener("click", closePreview);
   el.previewModal.querySelector(".modal-backdrop").addEventListener("click", closePreview);
 }
@@ -645,8 +2304,11 @@ function bindEvents() {
 function init() {
   initMap();
   bindEvents();
+  renderSheetTabs();
+  renderRegionScopeTabs();
   renderClusterList([]);
   renderUnlocated();
+  renderUnmatchedPlaces([]);
   renderCacheList();
   syncSelectionState();
   refreshCacheList();

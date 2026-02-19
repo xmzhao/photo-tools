@@ -19,6 +19,8 @@ import sys
 import threading
 import time
 import uuid
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
@@ -48,11 +50,15 @@ CACHE_DIR = APP_DIR / ".cache"
 THUMB_DIR = CACHE_DIR / "thumbs"
 PREVIEW_DIR = CACHE_DIR / "previews"
 SCAN_CACHE_DIR = CACHE_DIR / "scans"
+BOUNDARY_CACHE_DIR = CACHE_DIR / "boundaries"
 META_CACHE_PATH = CACHE_DIR / "meta_cache.json"
 SCAN_INDEX_PATH = CACHE_DIR / "scan_index.json"
 
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 BROWSER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif"}
+
+WORLD_BOUNDARY_URL = "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson"
+CHINA_PROVINCE_BOUNDARY_URL = "https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json"
 
 SVG_VIDEO_PLACEHOLDER = (
     "<svg xmlns='http://www.w3.org/2000/svg' width='320' height='240' viewBox='0 0 320 240'>"
@@ -114,6 +120,190 @@ def load_json(path: Path, default: Any) -> Any:
 def save_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def read_cached_or_download(url: str, cache_file: Path, *, max_age_seconds: int = 30 * 24 * 3600) -> bytes:
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    if cache_file.exists():
+        age_seconds = now_ts() - cache_file.stat().st_mtime
+        if age_seconds <= max_age_seconds:
+            return cache_file.read_bytes()
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "MediaMapBrowser/1.0 (+local tool)",
+            "Accept": "application/json, text/plain, */*",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
+            data = response.read()
+    except urllib.error.URLError as exc:
+        if cache_file.exists():
+            return cache_file.read_bytes()
+        raise RuntimeError(f"download failed: {url}") from exc
+
+    if not data:
+        if cache_file.exists():
+            return cache_file.read_bytes()
+        raise RuntimeError(f"empty payload: {url}")
+    cache_file.write_bytes(data)
+    return data
+
+
+def parse_geojson_bytes(raw: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("invalid geojson payload") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("invalid geojson object")
+    return payload
+
+
+def adcode_string(value: Any) -> str:
+    if isinstance(value, int):
+        return f"{value:06d}"
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return text.zfill(6)
+    return ""
+
+
+def is_prefecture_level_adcode(code: str) -> bool:
+    # Prefecture-level city adcode pattern: XXYY00 with YY != 00.
+    if len(code) != 6 or not code.isdigit():
+        return False
+    return code[2:4] != "00" and code[4:6] == "00"
+
+
+def build_china_prefecture_geojson() -> bytes:
+    province_raw = read_cached_or_download(
+        CHINA_PROVINCE_BOUNDARY_URL,
+        BOUNDARY_CACHE_DIR / "china_provinces.geojson",
+    )
+    province_geo = parse_geojson_bytes(province_raw)
+    province_features = province_geo.get("features")
+    if not isinstance(province_features, list):
+        raise RuntimeError("invalid province boundary data")
+
+    # Use province polygon as a synthetic prefecture-level unit when upstream
+    # data does not provide child city features (municipalities + SAR).
+    direct_municipalities = {"110000", "120000", "310000", "500000", "810000", "820000"}
+    seen_codes: set[str] = set()
+    merged_features: list[dict[str, Any]] = []
+    synthetic_sequence = 0
+
+    def push_feature(feature: dict[str, Any], *, source: str) -> None:
+        props = feature.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+            feature["properties"] = props
+        code = adcode_string(props.get("adcode"))
+        if code and code in seen_codes:
+            return
+        if code:
+            seen_codes.add(code)
+        props["_source"] = source
+        merged_features.append(feature)
+
+    for province in province_features:
+        if not isinstance(province, dict):
+            continue
+        props = province.get("properties")
+        if not isinstance(props, dict):
+            continue
+        province_code = adcode_string(props.get("adcode"))
+        if not province_code:
+            continue
+
+        found_prefecture = False
+        for suffix in ("", "_full"):
+            cache_path = BOUNDARY_CACHE_DIR / f"province_{province_code}{suffix}.geojson"
+            url = f"https://geo.datav.aliyun.com/areas_v3/bound/{province_code}{suffix}.json"
+            try:
+                city_raw = read_cached_or_download(url, cache_path)
+                city_geo = parse_geojson_bytes(city_raw)
+            except RuntimeError:
+                continue
+            city_features = city_geo.get("features")
+            if not isinstance(city_features, list):
+                continue
+
+            for city in city_features:
+                if not isinstance(city, dict):
+                    continue
+                geometry = city.get("geometry")
+                if not isinstance(geometry, dict):
+                    continue
+                city_props = city.get("properties")
+                if not isinstance(city_props, dict):
+                    continue
+                city_code = adcode_string(city_props.get("adcode"))
+                level = str(city_props.get("level", "")).lower()
+                if is_prefecture_level_adcode(city_code) or level == "city":
+                    cloned = {
+                        "type": "Feature",
+                        "geometry": geometry,
+                        "properties": dict(city_props),
+                    }
+                    push_feature(cloned, source=f"province:{province_code}")
+                    found_prefecture = True
+
+        if found_prefecture:
+            continue
+
+        # For direct municipalities, fallback to municipality boundary as one city-level region.
+        if province_code in direct_municipalities:
+            geometry = province.get("geometry")
+            if isinstance(geometry, dict):
+                synthetic_sequence += 1
+                fallback_feature = {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": dict(props),
+                }
+                fallback_feature["properties"]["adcode"] = province_code
+                fallback_feature["properties"]["level"] = "city"
+                fallback_feature["properties"]["_synthetic_prefecture"] = True
+                fallback_feature["properties"]["_synthetic_seq"] = synthetic_sequence
+                push_feature(fallback_feature, source=f"synthetic:{province_code}")
+
+    if not merged_features:
+        raise RuntimeError("failed to build china prefecture geojson")
+
+    payload = {"type": "FeatureCollection", "features": merged_features}
+    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    cache_path = BOUNDARY_CACHE_DIR / "china_prefecture_cities.geojson"
+    cache_path.write_bytes(encoded)
+    return encoded
+
+
+def china_prefecture_cache_has_hk_macao(raw: bytes) -> bool:
+    try:
+        payload = parse_geojson_bytes(raw)
+    except RuntimeError:
+        return False
+    features = payload.get("features")
+    if not isinstance(features, list):
+        return False
+
+    expected = {"810000", "820000"}
+    found: set[str] = set()
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        props = feature.get("properties")
+        if not isinstance(props, dict):
+            continue
+        code = adcode_string(props.get("adcode"))
+        if code in expected:
+            found.add(code)
+            if found == expected:
+                return True
+    return False
 
 
 def count_files(directory: Path) -> int:
@@ -246,6 +436,7 @@ class AppState:
         THUMB_DIR.mkdir(parents=True, exist_ok=True)
         PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
         SCAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        BOUNDARY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.jobs: dict[str, ScanJob] = {}
         self.media_index: dict[str, MediaRecord] = {}
         raw_cache = load_json(META_CACHE_PATH, {})
@@ -444,7 +635,7 @@ class AppState:
             self.meta_cache = {}
             self.meta_changed = False
             self.media_index = {}
-        for folder in (THUMB_DIR, PREVIEW_DIR, SCAN_CACHE_DIR):
+        for folder in (THUMB_DIR, PREVIEW_DIR, SCAN_CACHE_DIR, BOUNDARY_CACHE_DIR):
             shutil.rmtree(folder, ignore_errors=True)
             folder.mkdir(parents=True, exist_ok=True)
         for file_path in (META_CACHE_PATH, SCAN_INDEX_PATH):
@@ -464,6 +655,7 @@ class AppState:
             "thumb_files": count_files(THUMB_DIR),
             "preview_files": count_files(PREVIEW_DIR),
             "scan_files": count_files(SCAN_CACHE_DIR),
+            "boundary_files": count_files(BOUNDARY_CACHE_DIR),
         }
 
     def start_job(self, root_path: str) -> ScanJob:
@@ -1056,6 +1248,68 @@ class MediaMapHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/static/"):
             relative = parsed.path.removeprefix("/static/")
             self._serve_static(STATIC_DIR / relative)
+            return
+
+        if parsed.path == "/api/boundaries/world":
+            try:
+                payload = read_cached_or_download(
+                    WORLD_BOUNDARY_URL,
+                    BOUNDARY_CACHE_DIR / "world_countries.geojson",
+                )
+            except RuntimeError as exc:
+                self._json_response({"error": str(exc)}, status=502)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/geo+json; charset=utf-8")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(payload)))
+            if not self._safe_end_headers():
+                return
+            self._safe_write(payload)
+            return
+
+        if parsed.path == "/api/boundaries/china-provinces":
+            try:
+                payload = read_cached_or_download(
+                    CHINA_PROVINCE_BOUNDARY_URL,
+                    BOUNDARY_CACHE_DIR / "china_provinces.geojson",
+                )
+            except RuntimeError as exc:
+                self._json_response({"error": str(exc)}, status=502)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/geo+json; charset=utf-8")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(payload)))
+            if not self._safe_end_headers():
+                return
+            self._safe_write(payload)
+            return
+
+        if parsed.path == "/api/boundaries/china-prefecture-cities":
+            cache_path = BOUNDARY_CACHE_DIR / "china_prefecture_cities.geojson"
+            payload: bytes
+            if cache_path.exists():
+                payload = cache_path.read_bytes()
+                if not china_prefecture_cache_has_hk_macao(payload):
+                    try:
+                        payload = build_china_prefecture_geojson()
+                    except RuntimeError as exc:
+                        self._json_response({"error": str(exc)}, status=502)
+                        return
+            else:
+                try:
+                    payload = build_china_prefecture_geojson()
+                except RuntimeError as exc:
+                    self._json_response({"error": str(exc)}, status=502)
+                    return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/geo+json; charset=utf-8")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(payload)))
+            if not self._safe_end_headers():
+                return
+            self._safe_write(payload)
             return
 
         if parsed.path == "/api/scan/status":
