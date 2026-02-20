@@ -6,6 +6,7 @@
 - 读取照片 GPS 并反查中文 POI
 - 统计目录内媒体数量及 POI 热点
 - 批量重命名特定日期格式的文件夹
+- 本地优先 Web 工具：媒体地图浏览器（`media-map-browser/`）
 
 ## 目录结构
 
@@ -15,6 +16,23 @@
 - `count_media_files.py`：目录媒体计数 + POI 投票
 - `pic_proc.py`：旧目录名规则批量重命名
 - `common/`：公共模块（时间解析、GPS、逆地理、扩展名常量等）
+- `media-map-browser/`：媒体地图浏览器（地图聚合 + 区域着色 + 导出）
+
+## 媒体地图浏览器（Web）
+
+`media-map-browser/` 提供本地运行的地图浏览工具，支持：
+- 媒体模式：扫描本机目录并在地图显示图片/视频缩略图聚合
+- 区域模式：根据地名列表按区域边界着色（全球国家 / 中国.省 / 中国.地级市）
+- 导出：支持导出 SVG 和 PNG
+
+启动方式（仓库根目录）：
+
+```bash
+python3 -m pip install -r media-map-browser/requirements.txt
+python3 media-map-browser/server.py --host 127.0.0.1 --port 8765
+```
+
+浏览器访问：`http://127.0.0.1:8765`
 
 ## 环境要求
 
