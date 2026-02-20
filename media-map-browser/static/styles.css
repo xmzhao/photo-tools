@@ -110,10 +110,47 @@ button:disabled {
   letter-spacing: 0.02em;
 }
 
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  box-shadow: 0 3px 12px rgba(10, 46, 36, 0.25);
+  flex: 0 0 auto;
+}
+
 .sidebar-head p {
   margin: 4px 0 8px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.zoom-row {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: auto 88px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.zoom-row label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.zoom-row input {
+  text-align: center;
+}
+
+.zoom-row button {
+  padding: 7px 10px;
+  white-space: nowrap;
 }
 
 .side-card {
@@ -458,5 +495,9 @@ button:disabled {
 
   .scope-tabs {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .zoom-row {
+    grid-template-columns: auto 1fr auto;
   }
 }

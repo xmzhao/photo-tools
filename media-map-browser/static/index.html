@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>媒体地图浏览器</title>
+    <link rel="icon" type="image/svg+xml" href="/static/assets/media-map-logo.svg" />
+    <link rel="shortcut icon" href="/static/assets/media-map-logo.svg" />
+    <meta name="theme-color" content="#2f6f5a" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -19,9 +22,17 @@
     <div id="app-shell">
       <aside class="side-card">
         <div class="sidebar-head">
-          <h1>Media Map Browser</h1>
+          <div class="brand-row">
+            <img class="brand-logo" src="/static/assets/media-map-logo.svg" alt="Media Map Browser logo" />
+            <h1>Media Map Browser</h1>
+          </div>
           <p>本地扫描图片/视频，地图聚合展示缩略图</p>
           <div id="scanStatus" class="summary">空闲</div>
+          <div class="zoom-row">
+            <label for="mapZoomInput">缩放级别</label>
+            <input id="mapZoomInput" type="number" min="1" max="19" step="0.1" value="3.0" />
+            <button id="applyMapZoomBtn" type="button">应用</button>
+          </div>
         </div>
 
         <div class="sheet-pages">
@@ -69,18 +80,19 @@
             <section class="panel-block">
               <h2>地名区域着色</h2>
               <div class="scope-tabs">
-                <button id="globalScopeTab" class="scope-tab active" type="button">全球（国家）</button>
-                <button id="chinaProvinceScopeTab" class="scope-tab" type="button">中国（省份）</button>
-                <button id="chinaPrefectureScopeTab" class="scope-tab" type="button">中国（地级市）</button>
+                <button id="globalScopeTab" class="scope-tab active" type="button">全球国家</button>
+                <button id="chinaProvinceScopeTab" class="scope-tab" type="button">中国.省</button>
+                <button id="chinaPrefectureScopeTab" class="scope-tab" type="button">中国.地级市</button>
               </div>
-              <div id="chinaScopeHint" class="summary">中国地级市模式包含香港、澳门特别行政区。</div>
+              <div id="chinaScopeHint" class="summary">中国.地级市模式包含台湾、香港、澳门。</div>
               <label class="summary" for="placeFileInput">上传地名列表文件（txt/csv）</label>
               <input id="placeFileInput" type="file" accept=".txt,.csv,text/plain" />
               <textarea id="placeTextInput" class="place-text" placeholder="输入地名，支持换行、逗号分隔。例如：北京、成都、俄罗斯"></textarea>
               <div class="cache-actions">
                 <button id="highlightPlacesBtn" type="button">应用地名着色</button>
                 <button id="clearHighlightsBtn" type="button">清除地名着色</button>
-                <button id="exportRegionSvgBtn" type="button">导出 SVG（高清）</button>
+                <button id="exportRegionSvgBtn" type="button">导出SVG</button>
+                <button id="exportRegionPngBtn" type="button">导出PNG</button>
               </div>
               <div id="placeResultSummary" class="summary">未启用区域着色</div>
               <div id="placeUnmatchedList" class="list"></div>

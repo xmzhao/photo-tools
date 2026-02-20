@@ -191,7 +191,7 @@ def build_china_prefecture_geojson() -> bytes:
 
     # Use province polygon as a synthetic prefecture-level unit when upstream
     # data does not provide child city features (municipalities + SAR).
-    direct_municipalities = {"110000", "120000", "310000", "500000", "810000", "820000"}
+    direct_municipalities = {"110000", "120000", "310000", "500000", "710000", "810000", "820000"}
     seen_codes: set[str] = set()
     merged_features: list[dict[str, Any]] = []
     synthetic_sequence = 0
@@ -271,6 +271,28 @@ def build_china_prefecture_geojson() -> bytes:
                 fallback_feature["properties"]["_synthetic_seq"] = synthetic_sequence
                 push_feature(fallback_feature, source=f"synthetic:{province_code}")
 
+    # Keep special national overlays (e.g., South China Sea nine-dash line)
+    # consistent with province-mode data.
+    for province in province_features:
+        if not isinstance(province, dict):
+            continue
+        props = province.get("properties")
+        if not isinstance(props, dict):
+            continue
+        code = str(props.get("adcode", "")).strip()
+        if "_JD" not in code:
+            continue
+        geometry = province.get("geometry")
+        if not isinstance(geometry, dict):
+            continue
+        special_feature = {
+            "type": "Feature",
+            "geometry": geometry,
+            "properties": dict(props),
+        }
+        special_feature["properties"]["_synthetic_prefecture"] = True
+        push_feature(special_feature, source="province:special")
+
     if not merged_features:
         raise RuntimeError("failed to build china prefecture geojson")
 
@@ -281,7 +303,7 @@ def build_china_prefecture_geojson() -> bytes:
     return encoded
 
 
-def china_prefecture_cache_has_hk_macao(raw: bytes) -> bool:
+def china_prefecture_cache_is_complete(raw: bytes) -> bool:
     try:
         payload = parse_geojson_bytes(raw)
     except RuntimeError:
@@ -290,7 +312,7 @@ def china_prefecture_cache_has_hk_macao(raw: bytes) -> bool:
     if not isinstance(features, list):
         return False
 
-    expected = {"810000", "820000"}
+    expected = {"710000", "810000", "820000", "100000_JD"}
     found: set[str] = set()
     for feature in features:
         if not isinstance(feature, dict):
@@ -298,7 +320,11 @@ def china_prefecture_cache_has_hk_macao(raw: bytes) -> bool:
         props = feature.get("properties")
         if not isinstance(props, dict):
             continue
-        code = adcode_string(props.get("adcode"))
+        raw_code = props.get("adcode")
+        if isinstance(raw_code, str):
+            code = raw_code.strip()
+        else:
+            code = adcode_string(raw_code)
         if code in expected:
             found.add(code)
             if found == expected:
@@ -1291,7 +1317,7 @@ class MediaMapHandler(BaseHTTPRequestHandler):
             payload: bytes
             if cache_path.exists():
                 payload = cache_path.read_bytes()
-                if not china_prefecture_cache_has_hk_macao(payload):
+                if not china_prefecture_cache_is_complete(payload):
                     try:
                         payload = build_china_prefecture_geojson()
                     except RuntimeError as exc:
