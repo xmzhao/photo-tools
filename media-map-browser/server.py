@@ -59,6 +59,7 @@ BROWSER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".
 
 WORLD_BOUNDARY_URL = "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson"
 CHINA_PROVINCE_BOUNDARY_URL = "https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json"
+CHINA_PREFECTURE_CACHE_SCHEMA_VERSION = 2
 
 SVG_VIDEO_PLACEHOLDER = (
     "<svg xmlns='http://www.w3.org/2000/svg' width='320' height='240' viewBox='0 0 320 240'>"
@@ -220,7 +221,8 @@ def build_china_prefecture_geojson() -> bytes:
             continue
 
         found_prefecture = False
-        for suffix in ("", "_full"):
+        # Prefer "_full" geometry first; fallback to non-full only when needed.
+        for suffix in ("_full", ""):
             cache_path = BOUNDARY_CACHE_DIR / f"province_{province_code}{suffix}.geojson"
             url = f"https://geo.datav.aliyun.com/areas_v3/bound/{province_code}{suffix}.json"
             try:
@@ -296,7 +298,14 @@ def build_china_prefecture_geojson() -> bytes:
     if not merged_features:
         raise RuntimeError("failed to build china prefecture geojson")
 
-    payload = {"type": "FeatureCollection", "features": merged_features}
+    payload = {
+        "type": "FeatureCollection",
+        "_meta": {
+            "schema_version": CHINA_PREFECTURE_CACHE_SCHEMA_VERSION,
+            "full_geometry_preferred": True,
+        },
+        "features": merged_features,
+    }
     encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     cache_path = BOUNDARY_CACHE_DIR / "china_prefecture_cities.geojson"
     cache_path.write_bytes(encoded)
@@ -310,6 +319,17 @@ def china_prefecture_cache_is_complete(raw: bytes) -> bool:
         return False
     features = payload.get("features")
     if not isinstance(features, list):
+        return False
+
+    meta = payload.get("_meta")
+    if not isinstance(meta, dict):
+        return False
+    version = meta.get("schema_version")
+    try:
+        version_num = int(version)
+    except (TypeError, ValueError):
+        return False
+    if version_num < CHINA_PREFECTURE_CACHE_SCHEMA_VERSION:
         return False
 
     expected = {"710000", "810000", "820000", "100000_JD"}

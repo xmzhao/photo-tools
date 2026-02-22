@@ -388,6 +388,37 @@ button:disabled {
   z-index: 3;
 }
 
+.province-capital-marker-wrap {
+  background: transparent;
+  border: 0;
+  pointer-events: none;
+}
+
+.province-capital-marker {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid #1f5143;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow:
+    0 1px 6px rgba(8, 36, 28, 0.22),
+    0 0 0 1px rgba(255, 255, 255, 0.45) inset;
+  position: relative;
+}
+
+.province-capital-marker::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3.6px;
+  height: 3.6px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: #1f5143;
+}
+
 .leaflet-tooltip.region-map-label {
   background: transparent;
   border: 0;

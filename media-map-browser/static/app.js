@@ -5,6 +5,7 @@ const state = {
   markersLayer: null,
   regionLayer: null,
   regionHighlightLayer: null,
+  provinceCapitalLayer: null,
   regionMode: false,
   regionScope: "global",
   worldBoundaries: null,
@@ -143,6 +144,7 @@ function initMap() {
       });
     },
   });
+  state.provinceCapitalLayer = L.layerGroup();
 
   state.map.on("zoomend", () => {
     syncZoomInputFromMap();
@@ -294,6 +296,48 @@ const CHINA_PROVINCE_ALIAS_OVERRIDES = {
   "820000": ["澳门", "澳门特别行政区"],
 };
 
+const CHINA_PROVINCE_CAPITALS = {
+  "110000": { name: "北京", lon: 116.4074, lat: 39.9042 },
+  "120000": { name: "天津", lon: 117.2009, lat: 39.0842 },
+  "130000": { name: "石家庄", lon: 114.5149, lat: 38.0428 },
+  "140000": { name: "太原", lon: 112.5492, lat: 37.857 },
+  "150000": { name: "呼和浩特", lon: 111.6708, lat: 40.8183 },
+  "210000": { name: "沈阳", lon: 123.4315, lat: 41.8057 },
+  "220000": { name: "长春", lon: 125.3235, lat: 43.8171 },
+  "230000": { name: "哈尔滨", lon: 126.6424, lat: 45.756 },
+  "310000": { name: "上海", lon: 121.4737, lat: 31.2304 },
+  "320000": { name: "南京", lon: 118.7969, lat: 32.0603 },
+  "330000": { name: "杭州", lon: 120.1551, lat: 30.2741 },
+  "340000": { name: "合肥", lon: 117.2272, lat: 31.8206 },
+  "350000": { name: "福州", lon: 119.2965, lat: 26.0745 },
+  "360000": { name: "南昌", lon: 115.8582, lat: 28.6829 },
+  "370000": { name: "济南", lon: 117.1201, lat: 36.6512 },
+  "410000": { name: "郑州", lon: 113.6254, lat: 34.7466 },
+  "420000": { name: "武汉", lon: 114.3054, lat: 30.5931 },
+  "430000": { name: "长沙", lon: 112.9388, lat: 28.2282 },
+  "440000": { name: "广州", lon: 113.2644, lat: 23.1291 },
+  "450000": { name: "南宁", lon: 108.32, lat: 22.824 },
+  "460000": { name: "海口", lon: 110.1999, lat: 20.0442 },
+  "500000": { name: "重庆", lon: 106.5516, lat: 29.563 },
+  "510000": { name: "成都", lon: 104.0665, lat: 30.5728 },
+  "520000": { name: "贵阳", lon: 106.6302, lat: 26.647 },
+  "530000": { name: "昆明", lon: 102.8329, lat: 24.8801 },
+  "540000": { name: "拉萨", lon: 91.1322, lat: 29.6604 },
+  "610000": { name: "西安", lon: 108.9398, lat: 34.3416 },
+  "620000": { name: "兰州", lon: 103.8343, lat: 36.0611 },
+  "630000": { name: "西宁", lon: 101.7782, lat: 36.6171 },
+  "640000": { name: "银川", lon: 106.2309, lat: 38.4872 },
+  "650000": { name: "乌鲁木齐", lon: 87.6168, lat: 43.8256 },
+  "710000": { name: "台北", lon: 121.5654, lat: 25.033 },
+  "810000": { name: "香港", lon: 114.1694, lat: 22.3193 },
+  "820000": { name: "澳门", lon: 113.5439, lat: 22.1987 },
+};
+
+const CHINA_PROVINCE_CAPITAL_MARKER_OFFSETS = {
+  // Avoid overlapping with province label in municipality area.
+  "500000": { lon: 0.24, lat: -0.12 }, // 重庆
+};
+
 const CHINA_PROVINCE_LABEL_ANCHOR_OVERRIDES = {
   // Shared province label anchors for both "中国.省" and "中国.地级市".
   "150000": [111.0, 44.8], // 内蒙古
@@ -305,6 +349,8 @@ const CHINA_PROVINCE_LABEL_OFFSET_FACTORS = {
   "110000": { x: -1.25, y: -0.8 },
   "120000": { x: 1.2, y: -0.75 },
   "130000": { x: 0.0, y: 0.3 },
+  // Chongqing
+  "500000": { x: 2.35, y: 0.0 },
   // Guangxi-Guangdong-HK-Macau
   "450000": { x: -0.5, y: 0.35 },
   "440000": { x: -0.2, y: -0.08 },
@@ -369,7 +415,21 @@ function parsePlaceNames(rawText) {
 function expandPlaceTokens(rawName) {
   const normalized = normalizePlaceName(rawName);
   const expanded = new Set([normalized]);
-  const override = PLACE_ALIAS_OVERRIDES[rawName] || PLACE_ALIAS_OVERRIDES[normalized];
+  let override = PLACE_ALIAS_OVERRIDES[rawName] || PLACE_ALIAS_OVERRIDES[normalized];
+  if (!Array.isArray(override)) {
+    for (const [key, aliases] of Object.entries(PLACE_ALIAS_OVERRIDES)) {
+      if (!Array.isArray(aliases)) continue;
+      if (normalizePlaceName(key) === normalized) {
+        override = aliases;
+        break;
+      }
+      const hit = aliases.some(candidate => normalizePlaceName(candidate) === normalized);
+      if (hit) {
+        override = aliases;
+        break;
+      }
+    }
+  }
   if (Array.isArray(override)) {
     for (const candidate of override) {
       const c = normalizePlaceName(candidate);
@@ -667,6 +727,7 @@ function refreshRegionLayerData() {
   state.regionLayer.addData(getRenderableBoundaryFeatures());
   applyRegionStyles();
   refreshRegionHighlightLayer();
+  renderProvinceCapitalLayer();
 }
 
 function refreshPrefectureProvinceMatchCache() {
@@ -790,6 +851,51 @@ function renderUnmatchedPlaces(unmatched) {
     row.className = "summary";
     row.textContent = `未匹配：${name}`;
     el.placeUnmatchedList.appendChild(row);
+  }
+}
+
+function shouldRenderProvinceCapitals() {
+  return state.regionMode && (state.regionScope === "china_province" || state.regionScope === "china_prefecture");
+}
+
+function getCapitalMarkerLonLat(code, capital) {
+  const offset = CHINA_PROVINCE_CAPITAL_MARKER_OFFSETS[code];
+  if (!offset) return [capital.lon, capital.lat];
+  return [capital.lon + (offset.lon || 0), capital.lat + (offset.lat || 0)];
+}
+
+function renderProvinceCapitalLayer() {
+  if (!state.map || !state.provinceCapitalLayer) return;
+  state.provinceCapitalLayer.clearLayers();
+
+  if (!shouldRenderProvinceCapitals()) {
+    if (state.map.hasLayer(state.provinceCapitalLayer)) {
+      state.map.removeLayer(state.provinceCapitalLayer);
+    }
+    return;
+  }
+
+  if (!state.map.hasLayer(state.provinceCapitalLayer)) {
+    state.provinceCapitalLayer.addTo(state.map);
+  }
+
+  const icon = L.divIcon({
+    className: "province-capital-marker-wrap",
+    html: '<span class="province-capital-marker"></span>',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+
+  for (const code of CHINA_PROVINCE_ORDERED_CODES) {
+    const capital = CHINA_PROVINCE_CAPITALS[code];
+    if (!capital) continue;
+    const [lon, lat] = getCapitalMarkerLonLat(code, capital);
+    const marker = L.marker([lat, lon], {
+      icon,
+      keyboard: false,
+      interactive: false,
+    });
+    state.provinceCapitalLayer.addLayer(marker);
   }
 }
 
@@ -918,6 +1024,7 @@ async function enterRegionMode() {
   if (state.regionHighlightLayer && !state.map.hasLayer(state.regionHighlightLayer)) {
     state.regionHighlightLayer.addTo(state.map);
   }
+  renderProvinceCapitalLayer();
   fitMapToHighlightedRegions();
   el.scanStatus.textContent = "区域模式已启用";
   return true;
@@ -930,6 +1037,9 @@ function exitRegionMode() {
   }
   if (state.map.hasLayer(state.regionLayer)) {
     state.map.removeLayer(state.regionLayer);
+  }
+  if (state.provinceCapitalLayer && state.map.hasLayer(state.provinceCapitalLayer)) {
+    state.map.removeLayer(state.provinceCapitalLayer);
   }
   if (state.mapLayerControl) {
     state.mapLayerControl.addTo(state.map);
@@ -1801,6 +1911,21 @@ async function buildRegionExportSvgPayload() {
         `<path d="${path}" fill="none" stroke="#8d836f" stroke-width="${provinceOutlineWidth}" stroke-opacity="0.95" vector-effect="non-scaling-stroke" fill-rule="evenodd"/>`
       );
     }
+
+    for (const code of CHINA_PROVINCE_ORDERED_CODES) {
+      const capital = CHINA_PROVINCE_CAPITALS[code];
+      if (!capital) continue;
+      const [lon, lat] = getCapitalMarkerLonLat(code, capital);
+      const p = projectLonLatToCanvas(lon, lat, bounds, size.width, size.height, padding);
+      const outer = Math.max(4.2, Math.min(7.2, Math.round(Math.min(width, height) * 0.0028)));
+      const inner = Math.max(1.8, outer * 0.34);
+      svgParts.push(
+        `<circle cx="${svgNum(p.x)}" cy="${svgNum(p.y)}" r="${svgNum(outer)}" fill="rgba(255,255,255,0.95)" stroke="#1f5143" stroke-width="${svgNum(Math.max(1.1, outer * 0.24))}"/>`
+      );
+      svgParts.push(
+        `<circle cx="${svgNum(p.x)}" cy="${svgNum(p.y)}" r="${svgNum(inner)}" fill="#1f5143" stroke="none"/>`
+      );
+    }
   }
 
   if (isSelectiveRegionScope(state.regionScope) || state.regionScope === "china_prefecture") {
@@ -2272,6 +2397,12 @@ async function clearAllCaches() {
     state.regionMatchFilterActive = false;
     state.regionHighlightLayer.clearLayers();
     state.regionLayer.clearLayers();
+    if (state.provinceCapitalLayer) {
+      state.provinceCapitalLayer.clearLayers();
+      if (state.map.hasLayer(state.provinceCapitalLayer)) {
+        state.map.removeLayer(state.provinceCapitalLayer);
+      }
+    }
     renderMapMarkers();
     renderClusterList([]);
     renderUnlocated();
