@@ -580,7 +580,14 @@ async function fetchBoundaryGeoJson(path) {
   const resp = await fetch(path);
   const text = await resp.text();
   if (!resp.ok) {
-    throw new Error(text || `请求失败: ${path}`);
+    let errorMsg = text;
+    try {
+      const errJson = JSON.parse(text);
+      if (errJson && errJson.error) errorMsg = errJson.error;
+    } catch (_) {
+      // use raw text
+    }
+    throw new Error(errorMsg || `请求失败: ${path}`);
   }
   try {
     return JSON.parse(text);
@@ -966,7 +973,18 @@ async function switchSheet(target) {
       renderSheetTabs();
       return;
     }
-    const ok = await enterRegionMode();
+    el.scanStatus.textContent = "正在加载区域数据，请稍候...";
+    el.regionSheetTab.disabled = true;
+    el.mediaSheetTab.disabled = true;
+    let ok = false;
+    try {
+      ok = await enterRegionMode();
+    } catch (err) {
+      alert(err?.message || "加载区域边界失败");
+    } finally {
+      el.regionSheetTab.disabled = false;
+      el.mediaSheetTab.disabled = false;
+    }
     if (!ok) {
       state.activeSheet = "media";
       renderSheetTabs();

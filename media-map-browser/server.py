@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import uuid
+import http.client
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -140,7 +141,7 @@ def read_cached_or_download(url: str, cache_file: Path, *, max_age_seconds: int 
     try:
         with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
             data = response.read()
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, http.client.IncompleteRead, OSError) as exc:
         if cache_file.exists():
             return cache_file.read_bytes()
         raise RuntimeError(f"download failed: {url}") from exc
